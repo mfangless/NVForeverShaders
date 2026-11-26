@@ -16,6 +16,9 @@ import bevy_pbr::render::{
     shadows::{get_cascade_index, world_to_directional_light_local},
 };
 @if(NVF_PHYSICAL_PBR) import bevy_pbr::render::pbr_lighting::nvf_diffuse_brdf;
+@if(ENVIRONMENT_MAP) import bevy_pbr::light_probe::environment_map::compute_radiances;
+@if(ENVIRONMENT_MAP) import bevy_pbr::render::pbr_lighting::{LightingInput, LAYER_BASE};
+@if(ENVIRONMENT_MAP) import bevy_pbr::render::clustered_forward::ClusterableObjectIndexRanges;
 import bevy_render::maths::PI;
 
 // NVF_SKIN_SPLIT: the diffuse light of the last nvf_skin_eval, the share the screen-space
@@ -67,12 +70,16 @@ fn nvf_skin_lobe(u: vec3<f32>, sigma: vec3<f32>) -> vec3<f32> {
     return max(vec3(0.0), (u * phi_cdf + s * phi_pdf) * exp(-0.5 * s * s));
 }
 
+// The red tail is the face's, not the forearm's the d'Eon & Irving profile was measured on:
+// facial skin holds more blood and red light travels farther in it [hypothesis: skin
+// research notes 2026-11-26 §1.4, citing Donner & Jensen 2006 and Chiang et al. 2016; the
+// numbers are a starting point to tune by eye, the forearm fit was w2.r 0.549, s2.r 1.55].
 fn nvf_preintegrated_skin(ndotl_rgb: vec3<f32>, curvature_mm: f32) -> vec3<f32> {
     let k = clamp(curvature_mm, 0.0, 0.45);
-    let w1 = vec3(0.451, 0.791, 0.649);
-    let w2 = vec3(0.549, 0.209, 0.351);
+    let w1 = vec3(0.36, 0.791, 0.649);
+    let w2 = vec3(0.64, 0.209, 0.351);
     let s1 = vec3(0.20, 0.14, 0.08) * k;
-    let s2 = vec3(1.55, 0.50, 0.24) * k;
+    let s2 = vec3(1.95, 0.50, 0.24) * k;
     return clamp(w1 * nvf_skin_lobe(ndotl_rgb, s1) + w2 * nvf_skin_lobe(ndotl_rgb, s2), vec3(0.0), vec3(1.0));
 }
 
@@ -92,7 +99,20 @@ fn nvf_skin_soft_ramp(x: vec3<f32>, sigma: vec3<f32>) -> vec3<f32> {
 
 // Width of each channel's scattering across a shadow's penumbra, in penumbra widths: red
 // light travels farthest in skin, blue least (d'Eon & Irving 2007 profile, sss.rs tests).
-const NVF_SKIN_PENUMBRA_SIGMA: vec3<f32> = vec3(0.20, 0.10, 0.06);
+const NVF_SKIN_PENUMBRA_SIGMA: vec3<f32> = vec3(0.34, 0.11, 0.05);
+
+// How far each channel's diffuse light takes the geometric normal over the normal map's
+// (nvf_skin_eval; Penner & Borshukov 2011 §2.4) [hypothesis: skin research notes
+// 2026-11-26 §1.3; the earlier 0.08, 0.04, 0 left the pores shading as dark grit].
+const NVF_SKIN_NORMAL_SMOOTH: vec3<f32> = vec3(0.80, 0.50, 0.20);
+
+// NVF_SKIN_SPLIT: the screen-space pass (sss/screen.rs) blurs the skin's light afterwards,
+// so the pre-integration's wrap and the penumbra's bleed here are kept at this share of
+// their width; without it (multisampling, sss/screen.rs) they are whole. The screen blur
+// cannot gather light round a silhouette seen edge-on (the nose, the jaw), where the
+// pre-integration still can [hypothesis: skin research notes 2026-11-26 §1.4].
+@if(NVF_SKIN_SPLIT) const NVF_SKIN_SPLIT_SHARE: f32 = 0.40;
+@if(!NVF_SKIN_SPLIT) const NVF_SKIN_SPLIT_SHARE: f32 = 1.0;
 
 // SHADE_LIGHT (the player's first-person arms): the shadow as it is. with_shade_light
 // (nif_material.wesl) takes the shadowed light apart and puts it back together, which
@@ -106,14 +126,22 @@ const NVF_SKIN_PENUMBRA_SIGMA: vec3<f32> = vec3(0.20, 0.10, 0.06);
 // dark side, red farthest, so a shadow's edge on skin runs warm. The filtered shadow value
 // is read as the position across the penumbra, sharpened by 2 (the step takes the middle
 // half of the filter's ramp, as the paper sharpens it before the blur), and each channel
-// is then blurred by its scattering width. Held so that 0 stays 0 and 1 stays 1; the blur
-// is symmetric, so what the dark side gains the lit side's edge loses.
+// is then blurred by its scattering width, held so that 0 stays 0 and 1 stays 1. Warm
+// only: on the dark side red runs past green and green past blue as blurred; on the lit
+// side, where the symmetric blur took red and green below blue (an olive band before
+// every shadow), each keeps blue's light (red never below blue, green between them)
+// [hypothesis: skin research notes 2026-11-26 §1.4; the notes' own formula, a stretch
+// about 0.35, put the bleed below the shadow on the dark side and so added none there].
 @if(!SHADE_LIGHT) fn nvf_skin_shadow(shadow: f32, curvature_mm: f32) -> vec3<f32> {
+    let sigma = NVF_SKIN_PENUMBRA_SIGMA * NVF_SKIN_SPLIT_SHARE;
     let x = (saturate(shadow) - 0.5) * 2.0 + 0.5;
-    let g = nvf_skin_soft_ramp(vec3(x), NVF_SKIN_PENUMBRA_SIGMA);
-    let g0 = nvf_skin_soft_ramp(vec3(-0.5), NVF_SKIN_PENUMBRA_SIGMA);
-    let g1 = nvf_skin_soft_ramp(vec3(1.5), NVF_SKIN_PENUMBRA_SIGMA);
-    return saturate((g - g0) / max(g1 - g0, vec3(1e-4)));
+    let g = nvf_skin_soft_ramp(vec3(x), sigma);
+    let g0 = nvf_skin_soft_ramp(vec3(-0.5), sigma);
+    let g1 = nvf_skin_soft_ramp(vec3(1.5), sigma);
+    let blurred = saturate((g - g0) / max(g1 - g0, vec3(1e-4)));
+    let r = max(blurred.r, blurred.b);
+    let gr = min(max(blurred.g, blurred.b), r);
+    return vec3(r, gr, blurred.b);
 }
 
 fn nvf_sss_dielectric_E(F0: vec3<f32>, perceptual_roughness: f32, mu: f32) -> vec3<f32> {
@@ -134,8 +162,30 @@ fn nvf_sss_dielectric_T(F0_d: vec3<f32>, r: f32, NdotV: f32, NdotL: f32) -> vec3
     return ((vec3(1.0) - E_i) * (vec3(1.0) - E_o)) / max(vec3(1.0) - E_avg, vec3(1e-4));
 }
 
-// Dual-lobe skin specular: tight sebum/oil lobe (IOR 1.4, F0 = 0.028, weight 0.24)
-// layered over the base epidermal GGX lobe. Returns vec4(spec_rgb, F_oil_r).
+// Skin's specular (Jimenez et al. 2013, "Next-Generation Character Rendering": two GGX
+// lobes over a dielectric of F0 0.028, IOR about 1.4 [documented: Donner & Jensen 2006]).
+// The base lobe is Bevy's own: the material (nvf-assets nif_material.wesl, NVF_SKIN_SSS)
+// sets F0 0.028 and a roughness from 0.64 (dry) to 0.42 (oily) by the normal map's
+// specular mask, the oiliness. The oil is read back from that roughness here.
+const NVF_SKIN_ROUGH_DRY: f32 = 0.66;
+const NVF_SKIN_ROUGH_OILY: f32 = 0.52;
+
+fn nvf_skin_oiliness(perceptual_roughness: f32) -> f32 {
+    return saturate((NVF_SKIN_ROUGH_DRY - perceptual_roughness) / (NVF_SKIN_ROUGH_DRY - NVF_SKIN_ROUGH_OILY));
+}
+
+// The sebum lobe's roughness and weight at oiliness `oil`: a dewy T-zone and lips, a drier
+// jaw [hypothesis: skin research notes 2026-11-26 §1.2; starting values to tune by eye].
+fn nvf_skin_sebum_roughness(oil: f32) -> f32 {
+    return mix(0.36, 0.24, oil);
+}
+
+fn nvf_skin_sebum_weight(oil: f32) -> f32 {
+    return mix(0.10, 0.22, oil);
+}
+
+// The sebum lobe for one light. Returns vec4(spec_rgb, the share of the light it reflects,
+// which the diffuse light under it loses).
 fn nvf_skin_sebum_specular(N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, perceptual_roughness: f32) -> vec4<f32> {
     let NdotL = dot(N, L);
     let NdotV = max(dot(N, V), 0.0001);
@@ -145,11 +195,49 @@ fn nvf_skin_sebum_specular(N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, perceptual_
     let H = nvf_sss_safe_normalize(L + V, N);
     let NdotH = saturate(dot(N, H));
     let LdotH = saturate(dot(L, H));
-    let r_oil = clamp(perceptual_roughness * 0.68, 0.38, 0.52);
+    let oil = nvf_skin_oiliness(perceptual_roughness);
+    let r_oil = nvf_skin_sebum_roughness(oil);
+    let w_oil = nvf_skin_sebum_weight(oil);
     let a_oil = r_oil * r_oil;
     let F_oil = fresnel(vec3(0.028), LdotH);
-    let spec = D_GGX(a_oil, NdotH) * V_SmithGGXCorrelated(a_oil, NdotV, NdotL) * F_oil * NdotL * 0.06;
-    return vec4(spec, F_oil.r);
+    let spec = D_GGX(a_oil, NdotH) * V_SmithGGXCorrelated(a_oil, NdotV, NdotL) * F_oil * NdotL * w_oil;
+    return vec4(spec, w_oil * F_oil.r);
+}
+
+// The sky's light on skin (sss/hook.rs, physical PBR, after Bevy's environment light):
+// `diffuse_scale`, per channel, takes the sky's diffuse light from the normal map's N
+// toward the geometric normal by NVF_SKIN_NORMAL_SMOOTH, as nvf_skin_eval does each lamp's
+// (so the pores do not shade as grit in the shade either); `sebum`, the oil lobe's
+// reflection of the sky (nvf_skin_sebum_specular is for lamps only), split-sum at the oil's
+// roughness with F0 0.028 and the oil's weight.
+struct NvfSkinSky {
+    diffuse_scale: vec3<f32>,
+    sebum: vec3<f32>,
+}
+
+@if(ENVIRONMENT_MAP) fn nvf_skin_sky(
+    input: ptr<function, LightingInput>,
+    ranges: ptr<function, ClusterableObjectIndexRanges>,
+    found_diffuse_indirect: bool,
+    world_normal: vec3<f32>,
+) -> NvfSkinSky {
+    var out: NvfSkinSky;
+    let base = (*input).layers[LAYER_BASE];
+    let oil = nvf_skin_oiliness(base.perceptual_roughness);
+    let r_oil = nvf_skin_sebum_roughness(oil);
+    var oil_layer = base;
+    oil_layer.perceptual_roughness = r_oil;
+    oil_layer.roughness = r_oil * r_oil;
+    let at_n = compute_radiances(oil_layer, ranges, (*input).P, found_diffuse_indirect);
+    var smooth_layer = base;
+    smooth_layer.N = nvf_sss_safe_normalize(world_normal, base.N);
+    let at_ng = compute_radiances(smooth_layer, ranges, (*input).P, found_diffuse_indirect);
+    let irr = mix(at_n.irradiance, at_ng.irradiance, NVF_SKIN_NORMAL_SMOOTH);
+    let ok = at_n.irradiance > vec3(1e-6);
+    out.diffuse_scale = select(vec3(1.0), clamp(irr / max(at_n.irradiance, vec3(1e-6)), vec3(0.0), vec3(4.0)), ok);
+    let fab = F_AB(r_oil, max(base.NdotV, 0.0001));
+    out.sebum = (0.028 * fab.x + fab.y) * nvf_skin_sebum_weight(oil) * at_n.radiance;
+    return out;
 }
 
 fn nvf_dir_shadow_texel(coord: vec2<i32>, array_index: i32) -> f32 {
@@ -231,25 +319,36 @@ fn nvf_skin_eval(
     physical: bool,
 ) -> vec3<f32> {
     let ng = nvf_sss_safe_normalize(world_normal, N);
-    let n_r = nvf_sss_safe_normalize(mix(N, ng, 0.08), N);
-    let n_g = nvf_sss_safe_normalize(mix(N, ng, 0.04), N);
-    let n_b = N;
+    // Scattering under the skin smooths the light over the normal map's pores and bumps,
+    // red most (Penner & Borshukov 2011 §2.4, "scattering applied to normal maps"); the
+    // specular lobes keep the normal map's N whole. Under NVF_SKIN_SPLIT too: the screen
+    // blur's inner taps fall inside one pixel at a conversation's distance and leave the
+    // sub-millimetre grain alone [hypothesis: skin research notes 2026-11-26 §1.3].
+    let n_r = nvf_sss_safe_normalize(mix(N, ng, NVF_SKIN_NORMAL_SMOOTH.r), ng);
+    let n_g = nvf_sss_safe_normalize(mix(N, ng, NVF_SKIN_NORMAL_SMOOTH.g), ng);
+    let n_b = nvf_sss_safe_normalize(mix(N, ng, NVF_SKIN_NORMAL_SMOOTH.b), N);
     let ndotl_rgb = vec3(dot(n_r, L), dot(n_g, L), dot(n_b, L));
     let s = saturate(shadow);
-    // NVF_SKIN_SPLIT: the screen-space pass blurs this light across the skin by the
-    // diffusion profile (sss/screen.rs), which does what the pre-integration, the blurred
-    // normals and the warm penumbra stand in for; done twice the skin would blur twice.
-    @if(!NVF_SKIN_SPLIT) let preint = nvf_preintegrated_skin(ndotl_rgb, curvature_mm);
-    @if(!NVF_SKIN_SPLIT) let shadow_rgb = nvf_skin_shadow(s, curvature_mm);
-    @if(NVF_SKIN_SPLIT) let preint = vec3(saturate(dot(N, L)));
-    @if(NVF_SKIN_SPLIT) let shadow_rgb = vec3(s);
+    // NVF_SKIN_SPLIT: the screen-space pass blurs this light across the skin as well, so
+    // the wrap and the penumbra's bleed are kept narrower (NVF_SKIN_SPLIT_SHARE).
+    let preint = nvf_preintegrated_skin(ndotl_rgb, curvature_mm * NVF_SKIN_SPLIT_SHARE);
+    let shadow_rgb = nvf_skin_shadow(s, curvature_mm);
 
     let phase_fwd = 0.35 + 0.65 * pow(saturate(dot(V, -L)), 3.0);
     let d_est = clamp(0.65 / max(curvature_mm, 0.04), 3.5, 18.0);
     let eff_mm = select(d_est, max(thickness_mm, d_est), thickness_mm >= 0.0);
     let rim_grazing = pow(1.0 - saturate(dot(N, V)), 2.0);
     let back_wrap = saturate(dot(-N, L) * 0.5 + 0.25) * (0.35 + 0.65 * rim_grazing);
-    let back_scatter = nvf_skin_transmittance_profile(eff_mm) * (back_wrap * phase_fwd * s * saturate(macro_vis) * 0.45);
+    // The shadow map's own thickness (a directional light's, nvf_dir_skin_thickness_mm)
+    // already measures what the light passes through to reach this side: the front of an
+    // ear blocks the sun from its back by design, and a wall or a roof between them is far
+    // thicker than the profile reaches (no light left past about 15 mm). The filtered
+    // shadow would put the transmitted light out exactly where it shows; it applies only
+    // when the thickness is guessed from the curvature. SHADE_LIGHT shapes (the
+    // first-person arms) keep the light linear in the shadow (nvf_skin_shadow there).
+    @if(!SHADE_LIGHT) let back_shadow = select(s, 1.0, thickness_mm >= 0.0);
+    @if(SHADE_LIGHT) let back_shadow = s;
+    let back_scatter = nvf_skin_transmittance_profile(eff_mm) * (back_wrap * phase_fwd * back_shadow * saturate(macro_vis) * 0.45);
 
     let sebum = nvf_skin_sebum_specular(N, V, L, perceptual_roughness);
     let spec_oil = sebum.xyz * (s * PI);
@@ -269,7 +368,7 @@ fn nvf_skin_eval(
             saturate(dot(N, h_skin)),
             saturate(dot(L, h_skin)),
         ) * PI;
-        let t_oil = 1.0 - 0.06 * sebum.w;
+        let t_oil = 1.0 - sebum.w;
         let diffuse = (skin_brdf_pi * (preint * shadow_rgb) + diffuse_color * back_scatter) * t_oil * light_rad;
         nvf_skin_last_diffuse = diffuse;
         return diffuse + spec_oil * light_rad;
@@ -277,7 +376,7 @@ fn nvf_skin_eval(
     @if(!NVF_PHYSICAL_PBR)
     if physical {
         let t_base = nvf_sss_dielectric_T(F0_dielectric, saturate(perceptual_roughness), max(dot(N, V), 0.0001), max(dot(N, L), 0.0001));
-        let t_oil = 1.0 - 0.06 * sebum.w;
+        let t_oil = 1.0 - sebum.w;
         let diffuse = diffuse_color * t_base * t_oil * skin_scatter * light_rad;
         nvf_skin_last_diffuse = diffuse;
         return diffuse + spec_oil * light_rad;

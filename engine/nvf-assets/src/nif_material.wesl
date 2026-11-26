@@ -108,7 +108,7 @@ import nvf_assets::nif_surface_bindings::{NifSurface, nif_surface, standard_mate
 @if(NVF_PBR_VIEW_OCCLUSION && !PREPASS_PIPELINE) import bevy_pbr::render::pbr_types::STANDARD_MATERIAL_FLAGS_OCCLUSION_TEXTURE_BIT;
 @if(NVF_PBR_VIEW_HEIGHT && !PREPASS_PIPELINE) import nvf_assets::nif_surface_bindings::height_texel;
 @if(NVF_PBR_VIEW_HEIGHT && !PREPASS_PIPELINE) import bevy_pbr::render::pbr_types::STANDARD_MATERIAL_FLAGS_DEPTH_MAP_BIT;
-@if(NVF_OUTFIT && !PREPASS_PIPELINE) import bevy_pbr::render::pbr_types::STANDARD_MATERIAL_FLAGS_SPECULAR_TEXTURE_BIT;
+@if((NVF_SKIN_SSS || NVF_OUTFIT) && !PREPASS_PIPELINE) import bevy_pbr::render::pbr_types::STANDARD_MATERIAL_FLAGS_SPECULAR_TEXTURE_BIT;
 @if(NVF_PBR_PARALLAX_MASK && !PREPASS_PIPELINE) import bevy_pbr::render::pbr_types as parallax_mask_types;
 @if(MESH_TERRAIN_BLEND) import nvf_assets::nif_surface_bindings::{mesh_terrain_lookup, mesh_terrain_view, mesh_terrain_shading, mesh_terrain_unlit_view, mesh_terrain_diagnostic, mesh_terrain_blend_normal, mesh_terrain_target_colour, mesh_terrain_target_normal, mesh_terrain_face_up, MeshTerrainInputs, LOOKUP_SUCCESS, LAND_ROUGHNESS, LAND_REFLECTANCE};
 @if(!NIF_SURFACE_BLEND) import nvf_assets::nif_surface_bindings::{env_cube_texel, env_mask_texel, env_mask_alpha};
@@ -869,6 +869,37 @@ fn nif_fragment(
     @if(NVF_SKIN_SSS && !PREPASS_PIPELINE && VERTEX_UVS_B) let SKIN_CURVATURE_MIN = 0.10;
     @if(NVF_SKIN_SSS && !PREPASS_PIPELINE && VERTEX_UVS_B) pbr_input.material.thickness = clamp(in.uv_b.x * SKIN_CURVATURE_SCALE, SKIN_CURVATURE_MIN, 0.45);
     @if(NVF_SKIN_SSS && !PREPASS_PIPELINE && !VERTEX_UVS_B) pbr_input.material.thickness = clamp(0.15 + 0.02 * skin_curv_raw, 0.15, 0.18);
+    // Skin's specular (nvforever sss.wesl `nvf_skin_sebum_specular`, which reads the oil back
+    // from the roughness): a dielectric of F0 0.028 everywhere, IOR about 1.4 [documented:
+    // Donner & Jensen 2006, "A Spectral BSSRDF for Shading Human Skin"]; Bevy's F0 is
+    // 0.16 x reflectance², so reflectance 0.418. The normal map's alpha, the game's specular
+    // mask (nif_spawn.rs `specular`), scaled F0 down to about 0.0002 (mean alpha 16 of 255 on
+    // the female head, docs/spec-notes/nif.md), under the 0.02 at which Bevy's sky
+    // reflection reads F0 as baked occlusion and puts it out; here it is the skin's
+    // oiliness instead: from mean skin (about 0.06) to the nose and lips (about 0.2 and up)
+    // [observed: nif.md for the mean; the peaks and the ramp, skin research notes
+    // 2026-11-26 §1.2, hypothesis]. Shapes whose alpha is no mask take SKIN_OIL_UNMASKED.
+    // Pores: where the normal map tips N off the geometric normal (a pore's walls), its
+    // specular is occluded, the rims keeping their glints (Jimenez et al. 2013 cavity
+    // occlusion; 2.0 an engineering choice: 2.5 left the face matte, 1.5 wet, owner's frames
+    // 2026-11-26). The ramp 0.03 to 0.20: mean skin about 0.15 oil, the nose and lips the top
+    // (0 to 0.15 made the whole face oily and wet, 0.02 to 0.22 matte).
+    @if(NVF_SKIN_SSS && !PREPASS_PIPELINE) {
+        let SKIN_OIL_UNMASKED = 0.25;
+        var skin_oil = SKIN_OIL_UNMASKED;
+        @if(VERTEX_UVS_A) {
+            let skin_mask_uv = (standard_material(in.instance_index).uv_transform * vec3(in.uv, 1.0)).xy;
+            let skin_mask = normal_map_texel(in.instance_index, skin_mask_uv).a;
+            skin_oil = select(SKIN_OIL_UNMASKED, smoothstep(0.03, 0.20, skin_mask), (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_SPECULAR_TEXTURE_BIT) != 0u);
+        }
+        let skin_w_oil = mix(0.10, 0.22, skin_oil);
+        let skin_f0_base = 0.028 * (1.0 - skin_w_oil);
+        pbr_input.material.reflectance = vec3(sqrt(skin_f0_base / 0.16));
+        let skin_roughness = mix(0.66, 0.52, skin_oil);
+        pbr_input.material.perceptual_roughness = skin_roughness;
+        let skin_pore = saturate(1.0 - dot(pbr_input.N, normalize(pbr_input.world_normal)));
+        pbr_input.specular_occlusion = pbr_input.specular_occlusion * saturate(1.0 - 2.0 * skin_pore);
+    }
     // NVF_OUTFIT (Pass A + Pass B under NVF_PHYSICAL_PBR): reinterprets un-authored vanilla
     // outfit/armor normal-alpha specular masks into physical roughness, clamped dielectric
     // F0 (> 0.02 so shadowed regions keep sky Fresnel), Kaplanyan & Hill (2016) Specular AA,

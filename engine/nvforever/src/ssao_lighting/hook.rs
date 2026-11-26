@@ -169,6 +169,11 @@ pub const PHYSICAL_LAMP_TEXT: &str = "    // NVForever ambient occlusion (nvfore
     let nvf_sky_vis = nvf_ao_phys.y;
     @if(NVF_AMBIENT_OCCLUSION)
     let nvf_sun_contact = nvf_ao_phys.z;
+    // Skin (nvforever sss.wesl) takes its own occlusion of the sky's light (nvf_ao_diffuse).
+    @if(NVF_AMBIENT_OCCLUSION && NVF_SKIN_SSS)
+    let nvf_ao_skin = true;
+    @if(NVF_AMBIENT_OCCLUSION && !NVF_SKIN_SSS)
+    let nvf_ao_skin = false;
     @if(NVF_AMBIENT_OCCLUSION)
     let nvf_ao_lamps = nvf_ao_multibounce(nvf_lamp_visibility(nvf_ao_ambient), diffuse_color);
 
@@ -176,8 +181,13 @@ pub const PHYSICAL_LAMP_TEXT: &str = "    // NVForever ambient occlusion (nvfore
 
 /// Screen-space sun contact shadow applied to the primary outdoor/key directional light.
 pub const PHYSICAL_CONTACT_SHADOW_TEXT: &str = "            // NVForever sun contact shadow (nvforever ssao_lighting.rs, NVF_PHYSICAL_PBR).
-            @if(NVF_AMBIENT_OCCLUSION)
+            @if(NVF_AMBIENT_OCCLUSION && !NVF_SKIN_SSS)
             if (i == 0u && nvf_display) { shadow *= nvf_sun_contact; }
+            // Skin: a quarter of it. The march's one-pixel depth steps drew hard black lines
+            // along the lips, lids and nostrils, which the skin's scattering would soften
+            // [hypothesis: skin research notes 2026-11-26 §1.1].
+            @if(NVF_AMBIENT_OCCLUSION && NVF_SKIN_SSS)
+            if (i == 0u && nvf_display) { shadow *= mix(1.0, nvf_sun_contact, 0.25); }
 ";
 
 /// Multi-bounce diffuse AO, architectural sky-visibility, and Frostbite specular AO on `ENVIRONMENT_MAP` IBL under `NVF_PHYSICAL_PBR=1`.
@@ -188,8 +198,10 @@ pub const PHYSICAL_IBL_AO_HOOKED: &str = "    @if(!NVF_AMBIENT_OCCLUSION)
     // NVForever ambient occlusion (nvforever ssao_lighting.rs): local multi-bounce AO + architectural sky-visibility + Frostbite specular AO on IBL.
     @if(NVF_AMBIENT_OCCLUSION)
     let nvf_ibl_sky_factor = mix(0.28, 1.0, clamp(nvf_sky_vis, 0.0, 1.0));
+    // (nvf_ao_diffuse: the multi-bounce fit; on skin, warm and not twice where the texture
+    // paints the cavity in, ssao_lighting.wesl.)
     @if(NVF_AMBIENT_OCCLUSION)
-    let nvf_ibl_diff_ao = diffuse_occlusion * nvf_ao_multibounce(nvf_ao_ambient * nvf_ibl_sky_factor, diffuse_color);
+    let nvf_ibl_diff_ao = diffuse_occlusion * nvf_ao_diffuse(nvf_ao_ambient * nvf_ibl_sky_factor, diffuse_color, nvf_ao_skin);
     @if(NVF_AMBIENT_OCCLUSION)
     let nvf_ibl_spec_ao = specular_occlusion * nvf_specular_ao(NdotV, nvf_ao_ambient * nvf_ibl_sky_factor, roughness);
 ";
@@ -203,7 +215,7 @@ pub const PHYSICAL_AMBIENT_LINE_HOOKED: &str = "            // NVForever ambient
             @if(!NVF_AMBIENT_OCCLUSION)
             let nvf_ambient_lin = nvf_srgb_to_linear_hdr(view_bindings::lights.ambient_color.rgb * view_bindings::view.exposure) * diffuse_occlusion; // nvf_physical_fallback_ambient
             @if(NVF_AMBIENT_OCCLUSION)
-            let nvf_ambient_lin = nvf_srgb_to_linear_hdr(view_bindings::lights.ambient_color.rgb * view_bindings::view.exposure) * diffuse_occlusion * nvf_ao_multibounce(nvf_ao_ambient * mix(0.28, 1.0, clamp(nvf_sky_vis, 0.0, 1.0)), diffuse_color);
+            let nvf_ambient_lin = nvf_srgb_to_linear_hdr(view_bindings::lights.ambient_color.rgb * view_bindings::view.exposure) * diffuse_occlusion * nvf_ao_diffuse(nvf_ao_ambient * mix(0.28, 1.0, clamp(nvf_sky_vis, 0.0, 1.0)), diffuse_color, nvf_ao_skin);
 ";
 
 /// The ambient occlusion hook in `apply_pbr_lighting` for the physical PBR patch
@@ -212,7 +224,7 @@ pub const PHYSICAL_HOOK_EDITS: [(&str, &str, Place); 8] = [
     (
         "import bevy_render::maths::{E, powsafe};\n",
         "// NVForever ambient occlusion (nvforever ssao_lighting.rs).
-@if(NVF_AMBIENT_OCCLUSION) import nvforever::ssao_lighting::{nvf_ambient_visibility, nvf_ao_debug, nvf_ao_multibounce, nvf_lamp_visibility, nvf_physical_occlusion};
+@if(NVF_AMBIENT_OCCLUSION) import nvforever::ssao_lighting::{nvf_ambient_visibility, nvf_ao_debug, nvf_ao_diffuse, nvf_ao_multibounce, nvf_lamp_visibility, nvf_physical_occlusion};
 ",
         Place::After,
     ),

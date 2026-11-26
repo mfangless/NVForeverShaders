@@ -78,13 +78,22 @@ mod tests {
         ((u * phi_cdf + s * phi_pdf) * (-0.5 * s * s).exp()).max(0.0)
     }
 
-    fn cpu_preintegrated_skin(ndotl: f32, curvature_mm: f32) -> [f32; 3] {
+    /// The two-lobe fit with red's second lobe `(w2_r, s2_r)`: the forearm fit to the d'Eon &
+    /// Irving profile is (0.549, 1.55); the shader's facial red is [`FACE_RED`].
+    fn cpu_preintegrated_skin_with(ndotl: f32, curvature_mm: f32, (w2_r, s2_r): (f32, f32)) -> [f32; 3] {
         let k = curvature_mm.clamp(0.0, 0.45);
-        let w1 = [0.451f32, 0.791, 0.649];
-        let w2 = [0.549f32, 0.209, 0.351];
+        let w1 = [1.0 - w2_r, 0.791, 0.649];
+        let w2 = [w2_r, 0.209, 0.351];
         let s1 = [0.20 * k, 0.14 * k, 0.08 * k];
-        let s2 = [1.55 * k, 0.50 * k, 0.24 * k];
+        let s2 = [s2_r * k, 0.50 * k, 0.24 * k];
         [0, 1, 2].map(|ch| (w1[ch] * cpu_skin_lobe(ndotl, s1[ch]) + w2[ch] * cpu_skin_lobe(ndotl, s2[ch])).clamp(0.0, 1.0))
+    }
+
+    const FOREARM_RED: (f32, f32) = (0.549, 1.55);
+    const FACE_RED: (f32, f32) = (0.64, 1.95);
+
+    fn cpu_preintegrated_skin(ndotl: f32, curvature_mm: f32) -> [f32; 3] {
+        cpu_preintegrated_skin_with(ndotl, curvature_mm, FACE_RED)
     }
 
     #[test]
@@ -92,10 +101,10 @@ mod tests {
         let wesl = unix_lines(include_str!("sss.wesl"));
         for snippet in [
             "fn nvf_preintegrated_skin(",
-            "let w1 = vec3(0.451, 0.791, 0.649);",
-            "let w2 = vec3(0.549, 0.209, 0.351);",
+            "let w1 = vec3(0.36, 0.791, 0.649);",
+            "let w2 = vec3(0.64, 0.209, 0.351);",
             "let s1 = vec3(0.20, 0.14, 0.08) * k;",
-            "let s2 = vec3(1.55, 0.50, 0.24) * k;",
+            "let s2 = vec3(1.95, 0.50, 0.24) * k;",
         ] {
             assert!(wesl.contains(snippet), "sss.wesl contains {snippet}");
         }
@@ -107,16 +116,24 @@ mod tests {
                 assert!((flat[ch] - want).abs() < 1e-3, "flat ndotl={ndotl}: {flat:?}");
             }
         }
-        // Across curved surfaces (0.02..0.35 mm^-1), matches exact 6-Gaussian Penner integral
-        // within 0.015 and produces warm R > G > B bleed at the terminator.
+        // Across curved surfaces (0.02..0.35 mm^-1) the forearm fit matches the exact
+        // 6-Gaussian Penner integral within 0.015, and the shader's green and blue are that
+        // fit's. Its facial red reaches farther: at least the forearm's from the terminator
+        // into the dark side, still under 1. Warm R > G > B at the terminator.
         for inv_r in [0.02f32, 0.08, 0.20, 0.35] {
             let term = cpu_preintegrated_skin(0.0, inv_r);
             assert!(term[0] > term[1] && term[1] > term[2], "R > G > B at terminator for k={inv_r}: {term:?}");
             for ndotl in [-0.4f32, -0.2, -0.1, 0.0, 0.15, 0.4, 0.8, 1.0] {
                 let exact = exact_penner_ring(ndotl, inv_r);
-                let approx = cpu_preintegrated_skin(ndotl, inv_r);
-                let err = [0, 1, 2].map(|ch| (exact[ch] - approx[ch]).abs()).into_iter().fold(0.0f32, f32::max);
-                assert!(err < 0.015, "k={inv_r} ndotl={ndotl}: err={err} exact={exact:?} approx={approx:?}");
+                let forearm = cpu_preintegrated_skin_with(ndotl, inv_r, FOREARM_RED);
+                let err = [0, 1, 2].map(|ch| (exact[ch] - forearm[ch]).abs()).into_iter().fold(0.0f32, f32::max);
+                assert!(err < 0.015, "k={inv_r} ndotl={ndotl}: err={err} exact={exact:?} approx={forearm:?}");
+                let face = cpu_preintegrated_skin(ndotl, inv_r);
+                assert_eq!(face[1..], forearm[1..], "green and blue are the forearm fit's");
+                if ndotl <= 0.0 {
+                    assert!(face[0] + 1e-6 >= forearm[0], "facial red reaches at least as far at {ndotl}: {face:?} {forearm:?}");
+                }
+                assert!(face[0] <= 1.0);
             }
         }
     }
@@ -129,24 +146,40 @@ mod tests {
         (u * phi_cdf + s * phi_pdf).max(0.0)
     }
 
-    fn cpu_skin_penumbra(shadow: f32) -> [f32; 3] {
-        let sigma = [0.20f32, 0.10, 0.06];
+    /// sss.wesl `nvf_skin_shadow` at width share `share` (`NVF_SKIN_SPLIT_SHARE`).
+    fn cpu_skin_penumbra_at(shadow: f32, share: f32) -> [f32; 3] {
+        let sigma = [0.34f32 * share, 0.11 * share, 0.05 * share];
         let ramp = |x: f32, s: f32| cpu_soft_start(x, s) - cpu_soft_start(x - 1.0, s);
         let x = (shadow.clamp(0.0, 1.0) - 0.5) * 2.0 + 0.5;
-        [0, 1, 2].map(|ch| {
+        let blurred = [0, 1, 2].map(|ch| {
             let (g0, g1) = (ramp(-0.5, sigma[ch]), ramp(1.5, sigma[ch]));
             ((ramp(x, sigma[ch]) - g0) / (g1 - g0).max(1e-4)).clamp(0.0, 1.0)
-        })
+        });
+        let r = blurred[0].max(blurred[2]);
+        let g = blurred[1].max(blurred[2]).min(r);
+        [r, g, blurred[2]]
+    }
+
+    /// The shadow as sharpened, unblurred: what blue (the narrowest) nearly is.
+    fn cpu_sharpened(shadow: f32) -> f32 {
+        ((shadow.clamp(0.0, 1.0) - 0.5) * 2.0 + 0.5).clamp(0.0, 1.0)
+    }
+
+    fn cpu_skin_penumbra(shadow: f32) -> [f32; 3] {
+        cpu_skin_penumbra_at(shadow, 1.0)
     }
 
     #[test]
-    fn skin_penumbra_keeps_its_ends_runs_warm_into_the_shadow_and_moves_no_light() {
+    fn skin_penumbra_keeps_its_ends_runs_warm_into_the_shadow_and_never_cools_the_lit_side() {
         let wesl = unix_lines(include_str!("sss.wesl"));
         for snippet in [
-            "const NVF_SKIN_PENUMBRA_SIGMA: vec3<f32> = vec3(0.20, 0.10, 0.06);",
+            "const NVF_SKIN_PENUMBRA_SIGMA: vec3<f32> = vec3(0.34, 0.11, 0.05);",
+            "@if(NVF_SKIN_SPLIT) const NVF_SKIN_SPLIT_SHARE: f32 = 0.40;",
             "@if(SHADE_LIGHT) fn nvf_skin_shadow(shadow: f32, curvature_mm: f32) -> vec3<f32> {",
             "@if(!SHADE_LIGHT) fn nvf_skin_shadow(shadow: f32, curvature_mm: f32) -> vec3<f32> {",
             "let x = (saturate(shadow) - 0.5) * 2.0 + 0.5;",
+            "let r = max(blurred.r, blurred.b);",
+            "let gr = min(max(blurred.g, blurred.b), r);",
         ] {
             assert!(wesl.contains(snippet), "sss.wesl contains {snippet}");
         }
@@ -172,10 +205,21 @@ mod tests {
             assert!(v[0] > v[1] && v[1] >= v[2], "warm at shadow {s}: {v:?}");
         }
         assert!(cpu_skin_penumbra(0.25)[0] > 0.05, "red reaches into the shadow: {:?}", cpu_skin_penumbra(0.25));
-        // Symmetric blur: across the penumbra each channel keeps the light it had.
-        for ch in 0..3 {
-            let mean = (0..1000).map(|i| cpu_skin_penumbra((i as f32 + 0.5) / 1000.0)[ch]).sum::<f32>() / 1000.0;
-            assert!((mean - 0.5).abs() < 0.01, "ch={ch} mean {mean}");
+        // Warm everywhere (R >= G >= B), and on the lit side no channel below blue (the old
+        // symmetric blur took red there, an olive band); blue near the sharpened shadow; at
+        // the split's narrower share too.
+        for share in [1.0f32, 0.40] {
+            for i in 0..=100 {
+                let s = i as f32 / 100.0;
+                let v = cpu_skin_penumbra_at(s, share);
+                assert!(v[0] + 1e-6 >= v[1] && v[1] + 1e-6 >= v[2], "R >= G >= B at {s} share {share}: {v:?}");
+                assert!((v[2] - cpu_sharpened(s)).abs() < 0.03, "blue is the sharpened shadow at {s}: {v:?}");
+                if s > 0.5 {
+                    assert!(v[0] - v[2] < 1e-6 && v[1] - v[2] < 1e-6, "neutral on the lit side at {s}: {v:?}");
+                }
+            }
+            let v = cpu_skin_penumbra_at(0.0, share);
+            assert!(v.iter().all(|c| c.abs() < 1e-5), "full shadow stays dark at share {share}: {v:?}");
         }
     }
 
@@ -253,7 +297,19 @@ mod tests {
                                 ("NVF_SUN_VISIBILITY", sun_on),
                             ],
                         );
-                        let want = resolve(&ao, &[("NVF_AMBIENT_OCCLUSION", ao_on), ("NVF_SUN_VISIBILITY", sun_on)]);
+                        // The ambient occlusion's hook names the SSS defs too (skin's own
+                        // occlusion and contact shadow), so the reference resolves them off.
+                        let want = resolve(
+                            &ao,
+                            &[
+                                ("NVF_SKIN_SSS", false),
+                                ("NVF_FOLIAGE_SSS", false),
+                                ("NVF_HAIR", false),
+                                ("NVF_OUTFIT", false),
+                                ("NVF_AMBIENT_OCCLUSION", ao_on),
+                                ("NVF_SUN_VISIBILITY", sun_on),
+                            ],
+                        );
                         assert_eq!(code_lines(&off), code_lines(&want), "physical={physical} env={env_map} ao={ao_on} sun={sun_on}: identity when SSS defs are off");
                         assert!(!code(&off).contains("nvf_sss_"), "no SSS calls when off");
 
@@ -379,7 +435,8 @@ mod tests {
             "if d_world < 0.20 {",
             "let eff_mm = select(d_est, max(thickness_mm, d_est), thickness_mm >= 0.0);",
             "let rim_grazing = pow(1.0 - saturate(dot(N, V)), 2.0);",
-            "let back_scatter = nvf_skin_transmittance_profile(eff_mm) * (back_wrap * phase_fwd * s * saturate(macro_vis) * 0.45);",
+            "@if(SHADE_LIGHT) let back_shadow = s;",
+            "let back_scatter = nvf_skin_transmittance_profile(eff_mm) * (back_wrap * phase_fwd * back_shadow * saturate(macro_vis) * 0.45);",
         ] {
             assert!(wesl.contains(snippet), "sss.wesl contains {snippet}");
         }

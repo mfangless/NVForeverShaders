@@ -4408,6 +4408,29 @@ Community Shaders code was read or used (the clean-room rule of #1503).
   one-dimensional passes sized by depth [documented: Jimenez, Sundstedt and Gutierrez
   2009, "Screen-Space Perceptual Rendering of Human Skin"; Jimenez et al. 2015,
   "Separable Subsurface Scattering"] (`sss/screen.rs`, `sss_screen.wesl`).
+- **Skin, revision of 2026-11-26** (experimental, the owner to tune by eye; the numbers
+  are starting values from the owner's skin research notes, [hypothesis] unless the table
+  says otherwise): the shadow is read on skin and hair to 30° past the terminator (the
+  geometric normal's test; before, a normal-mapped pore facing away from the sun read full
+  shadow, black grit on a sunlit cheek, and the wrap and the ears' backlight never showed);
+  the backlight through an ear takes the shadow map's thickness alone, not the shadow its
+  front casts; skin is a dielectric of F0 0.028 everywhere (the normal map's specular mask,
+  which had scaled F0 to about 0.0002, under the 0.02 at which Bevy puts the sky's
+  reflection out, is its oiliness instead: roughness 0.64 to 0.42 and the sebum lobe's
+  weight 0.06 to 0.16, which now reflects the sky too); pores' specular is occluded; each
+  channel's diffuse normal is smoothed toward the geometric one (0.80, 0.50, 0.20), sky
+  light included; the penumbra bleeds warm only (an olive band on the lit side gone; the
+  notes' own formula for it added no red on the dark side, so the paper's sharpened ramps
+  are kept and only their cool lit side clamped); a
+  facial red tail; the ambient occlusion on skin is warm and relaxed where the texture
+  paints a cavity dark already; the sun's contact shadow at a quarter on skin; under the
+  screen-space pass, the pre-integration and penumbra are kept at 0.55 of their width, the
+  taps are read between pixels and shortened by the surface's slope, and most of the
+  skin's colour is applied after the blur (pre- and post-scatter texturing [documented:
+  Jimenez et al. 2015], p = 0.25), written by the skin's fragments to a storage texture
+  (bevy_pbr `NvfSkinAlbedoBindings`, engine/vendor/README.md), so lips and lash lines stay
+  sharp; the eyes take 0.42 of the sky's diffuse light, a lower-lid shade and a warm
+  socket tint, and reflect less sky (0.3) under a lower lid line.
 - **Eyes**: a clear coat for the cornea, through which the iris is seen refracted and
   shifting with the view; a dark limbal ring; the sky's reflection shut out by the lids
   and brow except through the eye's opening; the upper lid's and the corners' shading
@@ -4431,8 +4454,16 @@ Community Shaders code was read or used (the clean-room rule of #1503).
 | skin profile (`sss/screen.rs` `PROFILE`, `sss.rs` tests `GAUSSIANS`) | six Gaussians, 0.0064-7.41 mm² | [documented: d'Eon and Luebke 2007, GPU Gems 3 ch. 14] |
 | `MM_PER_UNIT` (skin_curvature.rs, sss/screen.rs, sss_screen.wesl) | 14.3 mm | [hypothesis] 70 units per metre, as combat-rules.md |
 | `REACH_MM`, `TAPS`, `MAX_STEP_PX` (sss/screen.rs) | 8 mm, 17, 96 px | 8 mm: three σ of the widest Gaussian, under 1 % of red past it [checked: tests]; the rest [design] |
-| `NVF_SKIN_PENUMBRA_SIGMA` (sss.wesl) | (0.20, 0.10, 0.06) penumbra widths | [design] red widest, blue narrowest, in the profile's order |
-| skin roughness (nif_spawn.rs) | 0.58-0.72 | [design] |
+| `NVF_SKIN_PENUMBRA_SIGMA` (sss.wesl) | (0.34, 0.11, 0.05) penumbra widths, warm side only | [hypothesis] red widest, blue narrowest, in the profile's order (2026-11-26; was 0.20, 0.10, 0.06, symmetric) |
+| facial red lobe (sss.wesl `nvf_preintegrated_skin`) | w2.r 0.64, s2.r 1.95 | [hypothesis] facial blood volume (was the forearm fit, 0.549 and 1.55, [checked: tests] against the profile) |
+| `NVF_SKIN_NORMAL_SMOOTH` | (0.80, 0.50, 0.20) | [hypothesis] after Penner and Borshukov 2011 §2.4 (was 0.08, 0.04, 0) |
+| `NVF_SKIN_SPLIT_SHARE` | 0.55 | [hypothesis] |
+| skin F0 (nif_material.wesl, reflectance 0.418) | 0.028 | [documented: Donner and Jensen 2006, IOR about 1.4] |
+| skin roughness (nif_material.wesl), oiliness ramp | 0.64-0.42; smoothstep(0.03, 0.20) of the mask, 0.25 unmasked (tuned 2026-11-26: 0.48 and 0.02-0.22 matte, 0-0.15 wet) | [hypothesis]; the mask's mean 16/255 [observed: nif.md] |
+| sebum lobe roughness, weight (sss.wesl) | 0.40-0.28, 0.06-0.16 | [hypothesis] (the notes' 0.34-0.20 and 0.15-0.30 mirrored the sky at grazing angles) |
+| pore specular occlusion | 1 − 2 (1 − N·Ng) | [design] (2.5 matte, 1.5 wet) |
+| skin ambient occlusion (ssao_lighting.wesl `nvf_skin_ambient_occlusion`) | v^(0.7, 0.9, 1.05), floor (0.15, 0.08, 0.05) (tuned 2026-11-26 from the notes' 0.42-1.15 and 0.38-0.12: red eyelid rims); relaxed by 0.55 under linear luma 0.04-0.18 | [hypothesis] after Jimenez et al. 2016 |
+| sun contact shadow on skin | a quarter | [hypothesis] |
 | `EYE_IRIS_CENTRE`, `EYE_IRIS_RADIUS` (nif_material.wesl) | (0.50, 0.44), 0.19 | [observed: `eyelefthuman.nif`, `eyeblue.dds`, `eyedarkbrown.dds`] |
 | `EYE_IRIS_DEPTH` | 0.17 units | [hypothesis] about 2.5 mm, the human anterior chamber |
 | `EYE_CORNEA_ETA` | 1 / 1.376 | [hypothesis] the textbook cornea index |

@@ -14,6 +14,7 @@ const IMPORT_TEXT: &str = "// NVForever subsurface scattering (nvforever sss.rs)
 @if(NVF_SKIN_SSS) import nvforever::sss::{nvf_sss_point_skin, nvf_sss_spot_skin, nvf_sss_directional_skin};
 @if(NVF_FOLIAGE_SSS) import nvforever::sss::{nvf_sss_point_foliage, nvf_sss_spot_foliage, nvf_sss_directional_foliage};
 @if(NVF_SKIN_SSS && NVF_SKIN_SPLIT) import nvforever::sss::nvf_skin_last_diffuse;
+@if(NVF_SKIN_SSS && ENVIRONMENT_MAP) import nvforever::sss::nvf_skin_sky;
 @if(NVF_HAIR) import nvforever::sss::{nvf_sss_point_hair, nvf_sss_spot_hair, nvf_sss_directional_hair};
 @if(NVF_OUTFIT) import nvforever::sss::{nvf_sss_point_outfit, nvf_sss_spot_outfit, nvf_sss_directional_outfit};
 @if(NVF_OUTFIT && ENVIRONMENT_MAP) import nvforever::sss::nvf_outfit_sheen_sky;
@@ -63,10 +64,18 @@ const FOLIAGE_WEIGHT_PHYSICAL: &str = "    // NVForever subsurface scattering (n
 ";
 
 /// Physical PBR: the image-based light's diffuse share (`physical_patched`; the ambient
-/// occlusion hook keeps the line) is skin's diffuse light too.
+/// occlusion hook keeps the line). On skin its normal is smoothed per channel and the oil
+/// lobe reflects the sky (sss.wesl `nvf_skin_sky`); the diffuse share is skin's diffuse
+/// light too (NVF_SKIN_SPLIT), the oil's reflection is specular.
 const ENV_DIFFUSE_ANCHOR: &str = "    indirect_light += environment_light.diffuse * nvf_ibl_diff_ao;\n";
-const ENV_DIFFUSE_SPLIT_TEXT: &str = "    @if(NVF_SKIN_SSS && NVF_SKIN_SPLIT)
-    nvf_skin_d_indirect += environment_light.diffuse * nvf_ibl_diff_ao;
+const ENV_DIFFUSE_SKIN_TEXT: &str = "    @if(!NVF_SKIN_SSS)
+    indirect_light += environment_light.diffuse * nvf_ibl_diff_ao;
+    @if(NVF_SKIN_SSS)
+    let nvf_skin_sky_light = nvf_skin_sky(environment_map_lighting_input, &clusterable_object_index_ranges, found_diffuse_indirect, in.world_normal);
+    @if(NVF_SKIN_SSS)
+    indirect_light += environment_light.diffuse * nvf_skin_sky_light.diffuse_scale * nvf_ibl_diff_ao + nvf_skin_sky_light.sebum * nvf_ibl_spec_ao;
+    @if(NVF_SKIN_SSS && NVF_SKIN_SPLIT)
+    nvf_skin_d_indirect += environment_light.diffuse * nvf_skin_sky_light.diffuse_scale * nvf_ibl_diff_ao;
     @if(NVF_OUTFIT)
     indirect_light += nvf_outfit_sheen_sky(NdotV, diffuse_color, thickness, environment_light.diffuse) * nvf_ibl_diff_ao;
 ";
@@ -235,7 +244,7 @@ pub fn hook_patched(source: &str, physical: bool) -> Option<String> {
     edits.push((DIR_ANCHOR, &dir_text, Place::After));
     if physical {
         edits.push((INDIRECT_RESTORE_ANCHOR, INDIRECT_RESTORE_TEXT, Place::Before));
-        edits.push((ENV_DIFFUSE_ANCHOR, ENV_DIFFUSE_SPLIT_TEXT, Place::After));
+        edits.push((ENV_DIFFUSE_ANCHOR, ENV_DIFFUSE_SKIN_TEXT, Place::Replace));
         edits.push((DISPLAY_WEIGHTS_ANCHOR, SKIN_SPEC_TEXT, Place::Before));
         edits.push((TOTAL_ANCHOR, SKIN_MARK_TEXT, Place::After));
     }

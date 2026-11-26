@@ -105,6 +105,36 @@ fn nvf_ao_multibounce(visibility: f32, albedo: vec3<f32>) -> vec3<f32> {
     return clamp(max(vec3(x), ((x * k2 + k1) * x + k0) * x), vec3(0.0), vec3(1.0));
 }
 
+// NVF_SKIN_SSS: the occlusion of the ambient and the sky's light on skin, per channel.
+// 1. The game's face textures paint the eye sockets, nostrils and mouth corners dark
+//    already (linear about 0.03 to 0.07 there [observed: headhuman.dds with its FaceGen
+//    tint]); where the colour is that dark the screen-space occlusion is relaxed toward 1,
+//    so a cavity is not occluded twice.
+// 2. Light that reaches an occluded crease has travelled under the skin, so the occlusion
+//    takes blue most and red least (Jimenez et al. 2016, "Practical Real-Time Strategies
+//    for Accurate Indirect Occlusion": coloured occlusion for skin): v^(0.7, 0.9, 1.05),
+//    no lower than (0.15, 0.08, 0.05) (the notes' 0.42 and 0.38 for red ringed the eyelid
+//    creases red, owner's frames 2026-11-26).
+// 3. The multi-bounce lift (nvf_ao_multibounce) as on every surface, as its ratio to v.
+// [hypothesis: skin research notes 2026-11-26 §1.5; the numbers are starting values.]
+fn nvf_skin_ambient_occlusion(visibility: f32, albedo: vec3<f32>) -> vec3<f32> {
+    let luma = dot(clamp(albedo, vec3(0.0), vec3(1.0)), vec3(0.2126, 0.7152, 0.0722));
+    let baked = 1.0 - smoothstep(0.04, 0.18, luma);
+    let v = mix(clamp(visibility, 0.0, 1.0), 1.0, 0.55 * baked);
+    let warm = max(pow(vec3(v), vec3(0.7, 0.9, 1.05)), vec3(0.15, 0.08, 0.05));
+    let lift = select(vec3(1.0), nvf_ao_multibounce(v, albedo) / max(v, 1e-4), v > 1e-4);
+    return clamp(warm * lift, vec3(0.0), vec3(1.0));
+}
+
+// The occlusion on the sky's and the ambient's diffuse light under physical PBR: the
+// multi-bounce fit, or on skin (`skin`: the hook's NVF_SKIN_SSS) nvf_skin_ambient_occlusion.
+fn nvf_ao_diffuse(visibility: f32, albedo: vec3<f32>, skin: bool) -> vec3<f32> {
+    if skin {
+        return nvf_skin_ambient_occlusion(visibility, albedo);
+    }
+    return nvf_ao_multibounce(visibility, albedo);
+}
+
 // The factor on the light of lamps (point and spot lights) that cast no shadow at this
 // fragment: mix(1, g, w), g the ambient's factor as the caller already has it from
 // `nvf_ambient_visibility` (so the texels are read once a fragment; the same display value

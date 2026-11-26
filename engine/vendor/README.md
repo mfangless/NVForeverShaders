@@ -598,6 +598,13 @@ The shader that reads the bindings is nvforever's (`ssao_lighting.wesl`, patched
 component; without it the layouts and shader defs are upstream's, and the pipeline keys are
 the same keys numbered differently (the packed fields above the new bit moved up by one).
 As for the sun visibility, a meshlet view must not get the component.
+
+Another change (the skin's and the hair's shadow test, 2026-11-26,
+docs/design/graphics-enhanced.md, experimental): `src/render/pbr_functions.wesl` (the
+`NVForever skin and hair` blocks): under nvforever's `NVF_SKIN_SSS` or `NVF_HAIR` defs, the
+facing test is the geometric normal's, to 30 degrees past the terminator (`@elif`), since
+the skin's and the hair's light wraps past it.
+
 Graphics pass 2026-11-23, four more changes:
 
 - `src/cluster/gpu.rs`, `src/cluster/mod.rs`: bevy#25869 (GPU clustering keeps each view's

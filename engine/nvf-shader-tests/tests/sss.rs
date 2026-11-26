@@ -139,6 +139,7 @@ fn split_skin_composes_with_its_diffuse_share() {
                     "{defs:?}: the diffuse share is kept"
                 );
                 assert!(has_fn(&compiled, "nvf_skin_transmittance_profile"), "{defs:?}: transmittance kept");
+                assert_eq!(has_fn(&compiled, "nvf_skin_sky"), env_map, "{defs:?}: the sky's light on skin");
             }
         }
     }
