@@ -4449,6 +4449,16 @@ Community Shaders code was read or used (the clean-room rule of #1503).
 
 ## 4. Tried and dropped
 
+- **Hair edges, a blended fringe on alpha-tested hair** (2026-11-26, §3.25): card hair of
+  other load orders is alpha-tested only (one hair mod's 136 shapes all test, 135 at 128;
+  the game's own hair is all blended [observed: nif.md §6 "Hair borders and alpha"]), so it
+  ends in a hard cut, a helmet-like hairline. Keeping the test as the core and drawing the
+  shape again blended over it, as the game's blended hair is (#1576), looked right on some
+  of that mod's hairstyles and wrong on others (owner, 2026-11-26), and one rule has to
+  serve every load order: reverted. A fade toward the mesh's open border was dropped before
+  it was built: most of the game's hair shapes have no open border, and where they do the
+  texture's alpha there is already 0.
+
 - **Bevy `ContactShadows`** on the sun (16 steps, 40 units, thickness 12): the right effect on
   sunlit bushes, but a band of dark speckles on near surfaces seen at a grazing angle (the
   near roof at Goodsprings) and per-frame noise, which Bevy expects TAA to clean up.

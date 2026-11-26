@@ -1395,6 +1395,16 @@ quaternions [documented: nif.xml hkQuaternion vs Quaternion].
   [hypothesis, #2350]; whether its crown tints is unknown. Settle
   [observer check 216](../handoff/observer-checks.md#added-2026-11-15-lil-devils-crown-issue-2350)
   before considering a change to the provisional tint rule [design, #2350].
+- **Hair borders and alpha** [observed, `crates/fnv-nif/examples/hair_border_survey.rs`
+  over `Fallout - Meshes.bsa` with `Fallout - Textures.bsa` and `Textures2.bsa`,
+  2026-11-26]: 154 shapes with the Hair shader flag; 108 have no open border (vertices
+  welded by position, an edge used by one triangle being open), 46 do. Their diffuse alpha
+  at border vertices has a median of 0, and at the border's front-top part (the forward
+  quarter along +Y, the upper half along +Z) a 90th percentile of 0.01: the hair fades out
+  in its texture before its mesh ends. Every one is drawn blended: 102 blend only, 52 blend
+  and test with threshold 0 (nif_spawn.rs `alpha_mode`). Hair meshes of other load orders
+  may differ: one mod's 136 hair shapes are all open card meshes, alpha-tested (135 at 128,
+  one at 150) and never blended.
 - **Hair and depth** [observed, `characters\hair\hairbase.nif`]: the hair shape's
   NiAlphaProperty is flags 4333 (0x10ED), threshold 0: blend on, SRC_ALPHA /
   INV_SRC_ALPHA, alpha test off [documented: nif.xml AlphaFlags], so the renderers draw
