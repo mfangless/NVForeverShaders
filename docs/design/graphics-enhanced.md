@@ -4438,8 +4438,10 @@ Community Shaders code was read or used (the clean-room rule of #1503).
 | `EYE_CORNEA_ETA` | 1 / 1.376 | [hypothesis] the textbook cornea index |
 | `EYE_CORNEA_ROUGHNESS` (nif_spawn.rs), eye roughness | 0.06, 0.28-0.45 | [design] |
 | `EYE_LIMBUS_DARKEN`, `EYE_LIMBUS_WIDTH` | 0.35, 0.12 iris radii | [design] |
-| `EYE_SKY_OPEN`, `EYE_SKY_CLOSED` | 0.8, 0.08 | [design] the sky's reflection through the eye's opening and into the brow (owner's screenshot, 2026-11-23) |
-| `EYE_LID_V`, `EYE_LID_CLEAR_V`, `EYE_LID_DARKEN` | 0.30, 0.50, 0.45 | [design] darkest at the lower edge of the lid band the eye textures paint |
+| `EYE_SKY_OPEN`, `EYE_SKY_CLOSED` | 0.3, 0.08; upper cut 0.15-0.35 above the gaze | [design] the sky's reflection through the eye's opening and into the brow (owner's screenshot, 2026-11-23; 0.8 and 0.30-0.65 before 2026-11-26) |
+| `EYE_SKY_DIFFUSE` | 0.42 | [hypothesis] the hemisphere an eye in its socket sees |
+| `EYE_LID_V`, `EYE_LID_CLEAR_V`, `EYE_LID_DARKEN` | 0.30, 0.64, 0.45 | [design] darkest at the lower edge of the lid band the eye textures paint (clear by 0.50 before 2026-11-26) |
+| `EYE_LOWER_LID_V`, `EYE_LOWER_LID_DARKEN`; socket tint | 0.72 to 0.88, 0.25; socket^(0.65, 0.92, 1.10) | [hypothesis] |
 | `EYE_CORNER_U`, `EYE_CORNER_DEEP_U`, `EYE_CORNER_DARKEN` | 0.20, 0.36, 0.30 | [design] |
 | `NVF_HAIR_F0` (sss.wesl) | 0.0465 | [documented: keratin's index 1.55, Marschner et al. 2003 §4] |
 | `NVF_HAIR_SHIFT` | 0.035 rad | [documented: Karis 2016, after Marschner's 3°]; R shifted by −2×, TRT by 4× |

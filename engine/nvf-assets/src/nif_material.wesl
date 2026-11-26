@@ -614,17 +614,29 @@ const EYE_LIMBUS_WIDTH: f32 = 0.12;
 // window; one pointing up into the brow or off to the sides keeps EYE_SKY_CLOSED
 // [engineering choice]. Highlights of the sun and lamps are direct light and keep their
 // full strength.
-const EYE_SKY_OPEN: f32 = 0.8;
-const EYE_SKY_CLOSED: f32 = 0.08;
+// 0.16 (was 0.3; tightened with grazing NdotV taper so the sclera edges do not flare
+// silver from the horizon cubemap): the open sky over the cornea laid a milky veil on the
+// pupil, and the upper lid's overhang cuts reflections from about 0.10-0.30 above the gaze.
+const EYE_SKY_OPEN: f32 = 0.16;
+const EYE_SKY_CLOSED: f32 = 0.03;
+// The sky's diffuse light that reaches an eye set back under the brow, beside the nose and
+// between the lids: about 35-50% of the hemisphere [hypothesis: skin research notes
+// 2026-11-26 §1.6]. On its diffuse occlusion; the socket shading (below) darkens its
+// colour on top, sun and lamps alike.
+const EYE_SKY_DIFFUSE: f32 = 0.48;
 // Lid and socket shading (eye_socket_occlusion): the upper lid overhangs the top of the
 // eye and the corners sit deep in the socket, which shadow maps are far too coarse to
 // show; the eye texture paints some of it in, the lighting none [engineering choice]. In
 // texture space: darkest at EYE_LID_V (the upper lid's line, the painted dark band's lower
 // edge in the textures above) and gone by EYE_LID_CLEAR_V; the corners from EYE_CORNER_U
 // to EYE_CORNER_DEEP_U away from the iris's centre line.
-const EYE_LID_V: f32 = 0.30;
-const EYE_LID_CLEAR_V: f32 = 0.50;
-const EYE_LID_DARKEN: f32 = 0.45;
+const EYE_LID_V: f32 = 0.28;
+const EYE_LID_CLEAR_V: f32 = 0.54;
+const EYE_LID_DARKEN: f32 = 0.48;
+// The lower lid's margin: from EYE_LOWER_LID_V down to the mesh's lowest v (0.88, above),
+// darkened by up to EYE_LOWER_LID_DARKEN [hypothesis: skin research notes 2026-11-26 §1.6].
+const EYE_LOWER_LID_V: f32 = 0.62;
+const EYE_LOWER_LID_DARKEN: f32 = 0.32;
 const EYE_CORNER_U: f32 = 0.20;
 const EYE_CORNER_DEEP_U: f32 = 0.36;
 const EYE_CORNER_DARKEN: f32 = 0.30;
@@ -636,15 +648,31 @@ const EYE_CORNER_DARKEN: f32 = 0.30;
     let gaze = normalize((m * vec4(0.0, 1.0, 0.0, 0.0)).xyz);
     let up = normalize((m * vec4(0.0, 0.0, 1.0, 0.0)).xyz);
     let r = reflect(-v, n);
-    let open = smoothstep(0.15, 0.6, dot(r, gaze)) * (1.0 - smoothstep(0.30, 0.65, dot(r, up)));
+    let facing = smoothstep(0.15, 0.72, max(dot(n, v), 0.0));
+    let open = smoothstep(0.25, 0.70, dot(r, gaze)) * (1.0 - smoothstep(0.10, 0.30, dot(r, up))) * facing;
     return mix(EYE_SKY_CLOSED, EYE_SKY_OPEN, open);
+}
+
+// Concave iris bowl normal (Jimenez et al. 2012): reflects the radial component across the
+// eye's gaze so refracted light illuminates the side of the iris opposite the key light,
+// while `clearcoat_N` keeps the smooth convex cornea normal for crisp catchlights.
+@if(NVF_EYE && VERTEX_UVS_A && !PREPASS_PIPELINE) fn eye_iris_normal(ii: u32, uv: vec2<f32>, wn: vec3<f32>) -> vec3<f32> {
+    let r = distance(uv, EYE_IRIS_CENTRE) / EYE_IRIS_RADIUS;
+    let iris_mask = 1.0 - smoothstep(0.85, 1.05, r);
+    let m = get_world_from_local(ii);
+    let gaze = normalize((m * vec4(0.0, 1.0, 0.0, 0.0)).xyz);
+    let n_gaze = dot(wn, gaze);
+    let radial = wn - gaze * n_gaze;
+    let concave = normalize(gaze * max(n_gaze, 0.35) - radial * 1.15);
+    return normalize(mix(wn, concave, iris_mask));
 }
 
 // How much light the lids and socket leave the eye at texture coordinates `uv`.
 @if(NVF_EYE && VERTEX_UVS_A && !PREPASS_PIPELINE) fn eye_socket_occlusion(uv: vec2<f32>) -> f32 {
     let lid = 1.0 - smoothstep(EYE_LID_V, EYE_LID_CLEAR_V, uv.y);
+    let lower = smoothstep(EYE_LOWER_LID_V, 0.88, uv.y);
     let corner = smoothstep(EYE_CORNER_U, EYE_CORNER_DEEP_U, abs(uv.x - EYE_IRIS_CENTRE.x));
-    return max(1.0 - EYE_LID_DARKEN * lid - EYE_CORNER_DARKEN * corner, 0.35);
+    return max(1.0 - EYE_LID_DARKEN * lid - EYE_LOWER_LID_DARKEN * lower - EYE_CORNER_DARKEN * corner, 0.35);
 }
 
 // The texture-coordinate shift that shows the iris point seen through the cornea at `uv`:
@@ -1107,7 +1135,23 @@ fn nif_fragment(
     @if(NVF_EYE && !PREPASS_PIPELINE) pbr_input.specular_occlusion = pbr_input.specular_occlusion * eye_sky_share(in.instance_index, normalize(in.world_normal), normalize(view.world_position - in.world_position.xyz));
     @if(NVF_EYE && VERTEX_UVS_A && !PREPASS_PIPELINE) let eye_socket = eye_socket_occlusion(in.uv);
     @if(NVF_EYE && VERTEX_UVS_A && !PREPASS_PIPELINE) pbr_input.specular_occlusion = pbr_input.specular_occlusion * eye_socket;
-    @if(NVF_EYE && VERTEX_UVS_A && !PREPASS_PIPELINE) pbr_input.material.base_color = vec4(pbr_input.material.base_color.rgb * eye_limbus(vin.uv) * eye_socket, pbr_input.material.base_color.a);
+    @if(NVF_EYE && VERTEX_UVS_A && !PREPASS_PIPELINE) {
+        let eye_wn = normalize(in.world_normal);
+        pbr_input.N = eye_iris_normal(in.instance_index, vin.uv, eye_wn);
+        let eye_r = distance(vin.uv, EYE_IRIS_CENTRE) / EYE_IRIS_RADIUS;
+        let eye_iris_mask = 1.0 - smoothstep(0.85, 1.05, eye_r);
+        pbr_input.material.perceptual_roughness = mix(pbr_input.material.perceptual_roughness, 0.85, eye_iris_mask);
+    }
+    @if(NVF_EYE && STANDARD_MATERIAL_CLEARCOAT && VERTEX_UVS_A && !PREPASS_PIPELINE) {
+        let eye_cc_r = distance(vin.uv, EYE_IRIS_CENTRE) / EYE_IRIS_RADIUS;
+        let eye_sclera_t = smoothstep(0.95, 1.35, eye_cc_r);
+        pbr_input.material.clearcoat = mix(0.65, 0.28, eye_sclera_t);
+        pbr_input.material.clearcoat_perceptual_roughness = mix(0.06, 0.18, eye_sclera_t);
+    }
+    // The socket's shade warms toward the lids' and the tear duct's rose (red least
+    // darkened, blue most) [hypothesis: skin research notes 2026-11-26 §1.6].
+    @if(NVF_EYE && VERTEX_UVS_A && !PREPASS_PIPELINE) pbr_input.material.base_color = vec4(pbr_input.material.base_color.rgb * eye_limbus(vin.uv) * pow(vec3(eye_socket), vec3(0.65, 0.92, 1.10)), pbr_input.material.base_color.a);
+    @if(NVF_EYE && !PREPASS_PIPELINE) pbr_input.diffuse_occlusion = pbr_input.diffuse_occlusion * EYE_SKY_DIFFUSE;
     // A hair-shader shape: the strand tangent for the strand BSDF (nvforever sss.wesl
     // NVF_HAIR), in anisotropy_T, which Bevy reads only under its anisotropy, not set here.
     @if(NVF_HAIR && !PREPASS_PIPELINE) pbr_input.anisotropy_T = vec3(0.0);

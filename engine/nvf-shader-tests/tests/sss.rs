@@ -246,6 +246,7 @@ fn eye_shader_compiles_with_iris_depth_and_clear_coat() {
                 }
                 let compiled = compiler.compile("nvf_assets/nif_material.wesl", &defs);
                 assert!(has_fn(&compiled, "eye_iris_shift"), "{defs:?}: iris shift present");
+                assert!(has_fn(&compiled, "eye_iris_normal"), "{defs:?}: concave iris normal present");
                 assert!(has_fn(&compiled, "eye_limbus"), "{defs:?}: limbal ring present");
                 assert!(has_fn(&compiled, "eye_sky_share"), "{defs:?}: socket sky occlusion present");
                 assert!(has_fn(&compiled, "eye_socket_occlusion"), "{defs:?}: lid and socket shading present");
