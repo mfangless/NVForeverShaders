@@ -747,7 +747,10 @@ fn track_loads(
                 // Where the time went (issue #2407): each wait's end and the longest frame.
                 let phases = loading.last_phases.as_ref().map(|p| {
                     let until: serde_json::Map<String, serde_json::Value> = p.until.iter().map(|(n, t)| (n.to_string(), serde_json::json!((t * 1000.0).round()))).collect();
-                    serde_json::json!({ "until_ms": until, "longest_frame_ms": (p.longest_frame * 1000.0).round(), "frames": p.frames, "read_files": p.reads.files, "read_mb": (p.reads.bytes as f64 / 1e5).round() / 10.0, "read_ms": (p.reads.read_ns as f64 / 1e6).round(), "queued_ms": (p.reads.queued_ns as f64 / 1e6).round() })
+                    let pl = &p.pipelines;
+                    // Where the pipelines' time went (#2407), ms summed over the compile threads.
+                    let pipelines = serde_json::json!({ "compiled": pl.pipelines, "queued_ms": pl.queued_ms.round(), "lock_ms": pl.lock_ms.round(), "compose_ms": pl.compose_ms.round(), "modules_ms": pl.naga_ms.round(), "create_ms": pl.create_ms.round() });
+                    serde_json::json!({ "until_ms": until, "longest_frame_ms": (p.longest_frame * 1000.0).round(), "frames": p.frames, "read_files": p.reads.files, "read_mb": (p.reads.bytes as f64 / 1e5).round() / 10.0, "read_ms": (p.reads.read_ns as f64 / 1e6).round(), "queued_ms": (p.reads.queued_ns as f64 / 1e6).round(), "pipelines": pipelines })
                 });
                 c.detectors.fire(&mut c.summary, &c.here, t_s, "slow_load", serde_json::json!({ "load": kind, "ms": ms.round(), "phases": phases }));
             }

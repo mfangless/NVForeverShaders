@@ -120,7 +120,7 @@ fn skin_and_foliage_sss_compile_across_both_lighting_modes() {
 /// sss/screen.rs): the diffuse light kept apart per light composes with the image-based
 /// light on and off and the ambient occlusion on and off, baked curvature or not. The split
 /// needs a depth prepass and the skin's colour buffer (nvf_assets nif_material.rs
-/// `skin_split_applies`), which its fragments write at binding 47.
+/// `skin_split_applies`), which its fragments write at bindings 50-51.
 #[test]
 fn split_skin_composes_with_its_diffuse_share() {
     let mut compiler = Compiler::with_sss(true);
@@ -144,18 +144,18 @@ fn split_skin_composes_with_its_diffuse_share() {
                 assert!(has_fn(&compiled, "nvf_skin_transmittance_profile"), "{defs:?}: transmittance kept");
                 assert!(has_fn(&compiled, "nvf_skin_post_scatter"), "{defs:?}: the colour split");
                 assert!(has_fn(&compiled, "skin_strand_noise"), "{defs:?}: the hairline's strand noise");
-                assert!(binds(&compiled, 47), "{defs:?}: the skin's colour buffer");
-                assert!(binds(&compiled, 48), "{defs:?}: the skin's specular buffer");
+                assert!(binds(&compiled, 50), "{defs:?}: the skin's colour buffer");
+                assert!(binds(&compiled, 51), "{defs:?}: the skin's specular buffer");
                 assert_eq!(has_fn(&compiled, "nvf_skin_sky"), env_map, "{defs:?}: the sky's light on skin");
             }
         }
     }
     let unsplit = compiler.compile("nvf_assets/nif_material.wesl", &["NVF_SKIN_SSS", "NVF_PHYSICAL_PBR", "DEPTH_PREPASS"]);
-    assert!(!binds(&unsplit, 47) && !binds(&unsplit, 48) && !has_fn(&unsplit, "nvf_skin_post_scatter"), "no colour buffer without the split");
+    assert!(!binds(&unsplit, 50) && !binds(&unsplit, 51) && !has_fn(&unsplit, "nvf_skin_post_scatter"), "no colour buffer without the split");
 }
 
 /// Hair in a view with the skin's colour buffer marks its pixels for the hairline's shade
-/// (nvforever sss.wesl `nvf_hair_mark`, binding 47); without the buffer it does not.
+/// (nvforever sss.wesl `nvf_hair_mark`, binding 50); without the buffer it does not.
 #[test]
 fn hair_marks_the_hairline_with_the_colour_buffer() {
     let mut compiler = Compiler::with_sss(true);
@@ -167,10 +167,10 @@ fn hair_marks_the_hairline_with_the_colour_buffer() {
             defs.push("BLEND_ALPHA");
         }
         let compiled = compiler.compile("nvf_assets/nif_material.wesl", &defs);
-        assert!(has_fn(&compiled, "nvf_hair_mark") && binds(&compiled, 47), "{defs:?}: hair marks its pixels");
+        assert!(has_fn(&compiled, "nvf_hair_mark") && binds(&compiled, 50), "{defs:?}: hair marks its pixels");
     }
     let unbound = compiler.compile("nvf_assets/nif_material.wesl", &hair);
-    assert!(!has_fn(&unbound, "nvf_hair_mark") && !binds(&unbound, 47), "no mark without the buffer");
+    assert!(!has_fn(&unbound, "nvf_hair_mark") && !binds(&unbound, 50), "no mark without the buffer");
 }
 
 /// The screen-space skin scattering's two passes (nvforever sss_screen.wesl).

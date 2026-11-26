@@ -391,6 +391,8 @@ pub fn check_views_need_specialization(
             Option<&NvfSunVisibilityBindings>,
             // NVForever ambient occlusion.
             Has<NvfAmbientOcclusionBindings>,
+            // NVForever RTGI volume.
+            Has<NvfRtgiVolumeBindings>,
             // NVForever skin colour.
             Has<NvfSkinAlbedoBindings>,
         ),
@@ -419,6 +421,7 @@ pub fn check_views_need_specialization(
             has_contact_shadows,
             nvf_sun_visibility,
             nvf_ambient_occlusion,
+            nvf_rtgi_volume,
             nvf_skin_albedo,
         ),
     ) in views.iter_mut()
@@ -493,6 +496,10 @@ pub fn check_views_need_specialization(
             view_key |= MeshPipelineKey::NVF_AMBIENT_OCCLUSION;
         }
 
+        // NVForever RTGI volume: as the two above. No shader def follows from the bit.
+        if nvf_rtgi_volume {
+            view_key |= MeshPipelineKey::NVF_RTGI_VOLUME;
+        }
         // NVForever skin colour: likewise.
         if nvf_skin_albedo {
             view_key |= MeshPipelineKey::NVF_SKIN_ALBEDO;
@@ -3179,9 +3186,13 @@ bitflags::bitflags! {
         // NVForever sun visibility's light volume (engine/vendor/README.md): the view's
         // `NvfSunVisibilityBindings` has `cloud_volume` (bindings 45-46).
         const NVF_CLOUD_VOLUME_VISIBILITY       = 1 << 29;
+        // NVForever RTGI volume (engine/vendor/README.md): the view has
+        // `NvfRtgiVolumeBindings` (bindings 47-49). Sets no shader def: a material that reads
+        // them pushes its own.
+        const NVF_RTGI_VOLUME                   = 1 << 30;
         // NVForever skin colour (engine/vendor/README.md): the view has
-        // `NvfSkinAlbedoBindings` (binding 47).
-        const NVF_SKIN_ALBEDO                   = 1 << 30;
+        // `NvfSkinAlbedoBindings` (binding 50).
+        const NVF_SKIN_ALBEDO                   = 1 << 31;
         const LAST_FLAG                         = Self::NVF_SKIN_ALBEDO.bits();
 
         const ALL_PREPASS_BITS                  = Self::DEPTH_PREPASS.bits()
@@ -3801,7 +3812,7 @@ impl SpecializedMeshPipeline for MeshPipeline {
             shader_defs.push("NVF_AMBIENT_OCCLUSION".into());
         }
 
-        // NVForever skin colour (engine/vendor/README.md): binding 47 is in the layout.
+        // NVForever skin colour (engine/vendor/README.md): bindings 50-51 are in the layout.
         if key.contains(MeshPipelineKey::NVF_SKIN_ALBEDO) {
             shader_defs.push("NVF_SKIN_ALBEDO".into());
         }

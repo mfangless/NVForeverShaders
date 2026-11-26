@@ -107,8 +107,10 @@ bitflags::bitflags! {
         // NVForever sun visibility's light volume: bindings 45-46, with
         // `NVF_SUN_VISIBILITY` only ([`NvfSunVisibilityBindings::cloud_volume`]).
         const NVF_CLOUD_VOLUME                 = 1 << 19;
-        // NVForever skin colour: binding 47 ([`NvfSkinAlbedoBindings`]).
-        const NVF_SKIN_ALBEDO                  = 1 << 20;
+        // NVForever RTGI volume: bindings 47-49 ([`NvfRtgiVolumeBindings`]).
+        const NVF_RTGI_VOLUME                  = 1 << 20;
+        // NVForever skin colour: binding 50 ([`NvfSkinAlbedoBindings`]).
+        const NVF_SKIN_ALBEDO                  = 1 << 21;
     }
 }
 
@@ -166,9 +168,27 @@ pub struct NvfAmbientOcclusionBindings {
     pub texture: TextureView,
 }
 
+/// NVForever RTGI volume (2026-11-25, engine/vendor/README.md): what a view's mesh view bind
+/// group holds for the bounce light of a probe volume (nvforever `rtgi_volume.rs`,
+/// #3009), at bindings 47 (uniform), 48 (the volume, a filterable float 3D texture) and 49
+/// (a filtering sampler, used with 48 only). A view with it gets
+/// [`MeshPipelineViewLayoutKey::NVF_RTGI_VOLUME`] and those bindings, and its pipelines
+/// `MeshPipelineKey::NVF_RTGI_VOLUME`; the mesh pipeline pushes no shader def for them: the
+/// materials that read the bindings push their own. Both sides read this one component in
+/// the same frame, so it may be inserted or removed only during extraction; the texture
+/// view, the sampler and the buffer's contents may change in any render set before
+/// `RenderSystems::PrepareBindGroups`. Bevy inserts none; without it views are as
+/// upstream's.
+#[derive(Component, Clone)]
+pub struct NvfRtgiVolumeBindings {
+    pub uniform: Buffer,
+    pub texture: TextureView,
+    pub sampler: Sampler,
+}
+
 /// NVForever skin colour (2026-11-26, engine/vendor/README.md): what a view's mesh view bind
 /// group holds for the game's screen-space skin scattering (nvforever `sss/screen.rs`), at
-/// binding 47 (`Rgba8Unorm` post-scatter colour + mark) and binding 48 (`Rgba16Float` HDR
+/// binding 50 (`Rgba8Unorm` post-scatter colour + mark) and binding 51 (`Rgba16Float` HDR
 /// RGB specular light, kept out of the diffusion blur). A view with it gets
 /// [`MeshPipelineViewLayoutKey::NVF_SKIN_ALBEDO`] and those bindings, and its pipelines
 /// `MeshPipelineKey::NVF_SKIN_ALBEDO` with the shader def of the same name. As
@@ -272,6 +292,10 @@ impl From<MeshPipelineKey> for MeshPipelineViewLayoutKey {
         if value.contains(MeshPipelineKey::NVF_AMBIENT_OCCLUSION) {
             result |= MeshPipelineViewLayoutKey::NVF_AMBIENT_OCCLUSION;
         }
+        // NVForever RTGI volume.
+        if value.contains(MeshPipelineKey::NVF_RTGI_VOLUME) {
+            result |= MeshPipelineViewLayoutKey::NVF_RTGI_VOLUME;
+        }
         // NVForever skin colour.
         if value.contains(MeshPipelineKey::NVF_SKIN_ALBEDO) {
             result |= MeshPipelineViewLayoutKey::NVF_SKIN_ALBEDO;
@@ -368,6 +392,25 @@ pub fn nvf_sun_visibility_layout_entries(
         ));
     }
     out
+}
+
+/// NVForever RTGI volume: the mesh view layout's entries for [`NvfRtgiVolumeBindings`]
+/// under `layout_key` (binding, entry): 47-49 with
+/// [`MeshPipelineViewLayoutKey::NVF_RTGI_VOLUME`], none without.
+pub fn nvf_rtgi_layout_entries(
+    layout_key: MeshPipelineViewLayoutKey,
+) -> Vec<(u32, BindGroupLayoutEntryBuilder)> {
+    if !layout_key.contains(MeshPipelineViewLayoutKey::NVF_RTGI_VOLUME) {
+        return Vec::new();
+    }
+    vec![
+        (47, uniform_buffer_sized(false, None)),
+        (
+            48,
+            texture_3d(TextureSampleType::Float { filterable: true }),
+        ),
+        (49, sampler(SamplerBindingType::Filtering)),
+    ]
 }
 
 /// Returns the appropriate bind group layout vec based on the parameters
@@ -636,15 +679,19 @@ fn layout_entries(
             ),
         ));
     }
+    // NVForever RTGI volume ([`NvfRtgiVolumeBindings`]).
+    for (binding, entry) in nvf_rtgi_layout_entries(layout_key) {
+        entries = entries.extend_with_indices(((binding, entry),));
+    }
     // NVForever skin colour ([`NvfSkinAlbedoBindings`]).
     if layout_key.contains(MeshPipelineViewLayoutKey::NVF_SKIN_ALBEDO) {
         entries = entries.extend_with_indices((
             (
-                47,
+                50,
                 texture_storage_2d(TextureFormat::Rgba8Unorm, StorageTextureAccess::WriteOnly),
             ),
             (
-                48,
+                51,
                 texture_storage_2d(TextureFormat::Rgba16Float, StorageTextureAccess::WriteOnly),
             ),
         ));
@@ -820,6 +867,8 @@ pub fn prepare_mesh_view_bind_groups(
             Option<&NvfSunVisibilityBindings>,
             // NVForever ambient occlusion.
             Option<&NvfAmbientOcclusionBindings>,
+            // NVForever RTGI volume.
+            Option<&NvfRtgiVolumeBindings>,
             // NVForever skin colour.
             Option<&NvfSkinAlbedoBindings>,
         ),
@@ -897,6 +946,7 @@ pub fn prepare_mesh_view_bind_groups(
                 render_view_irradiance_volumes,
                 nvf_sun_visibility,
                 nvf_ambient_occlusion,
+                nvf_rtgi_volume,
                 nvf_skin_albedo,
             ),
             has_atmosphere,
@@ -1111,11 +1161,22 @@ pub fn prepare_mesh_view_bind_groups(
                     .extend_with_indices(((43, ao.uniform.as_entire_binding()), (44, &ao.texture)));
             }
 
+            // NVForever RTGI volume: present exactly when `check_views_need_specialization`
+            // gave the view's pipelines `MeshPipelineKey::NVF_RTGI_VOLUME`.
+            if let Some(volume) = nvf_rtgi_volume {
+                layout_key |= MeshPipelineViewLayoutKey::NVF_RTGI_VOLUME;
+                entries = entries.extend_with_indices((
+                    (47, volume.uniform.as_entire_binding()),
+                    (48, &volume.texture),
+                    (49, &volume.sampler),
+                ));
+            }
+
             // NVForever skin colour: present exactly when `check_views_need_specialization`
             // gave the view's pipelines `MeshPipelineKey::NVF_SKIN_ALBEDO`.
             if let Some(skin) = nvf_skin_albedo {
                 layout_key |= MeshPipelineViewLayoutKey::NVF_SKIN_ALBEDO;
-                entries = entries.extend_with_indices(((47, &skin.texture), (48, &skin.spec)));
+                entries = entries.extend_with_indices(((50, &skin.texture), (51, &skin.spec)));
             }
 
             let environment_map_bind_group_entries =

@@ -25,7 +25,7 @@
 //! The colour is split before and after the blur (Jimenez et al. 2015, pre- and
 //! post-scatter texturing; sss.wesl `nvf_skin_post_scatter`): the skin's fragments draw their
 //! diffuse light with most of their colour divided out and write that colour to a storage
-//! texture the main camera's view binds (bevy_pbr `NvfSkinAlbedoBindings`, binding 47, given
+//! texture the main camera's view binds (bevy_pbr `NvfSkinAlbedoBindings`, binding 50, given
 //! by [`extract_skin_albedo`] and pointed at this frame's texture by [`prepare`]), so the
 //! lips, the lash line and moles stay sharp under the blur.
 //!
@@ -81,9 +81,9 @@ pub const MAX_STEP_PX: f32 = 96.0;
 
 const TEMP_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 /// The skin's post-scatter colour (sss.wesl `nvf_skin_post_scatter`: its square root), the
-/// format of bevy_pbr's binding 47.
+/// format of bevy_pbr's binding 50.
 const ALBEDO_FORMAT: TextureFormat = TextureFormat::Rgba8Unorm;
-/// The skin's exact HDR RGB specular light (sss.wesl `nvf_skin_spec_buf`), binding 48.
+/// The skin's exact HDR RGB specular light (sss.wesl `nvf_skin_spec_buf`), binding 51.
 const SPEC_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 
 /// d'Eon & Irving (2007) 6-Gaussian skin diffusion profile: variance (mm²), RGB weight
@@ -179,7 +179,7 @@ struct SsssView {
     uniform: Buffer,
 }
 
-/// 1x1 placeholder storage textures bound at bindings 47-48 until [`prepare`] points the
+/// 1x1 placeholder storage textures bound at bindings 50-51 until [`prepare`] points the
 /// view at this frame's textures (and kept where the pass does not run: no skin fragment
 /// writes then, the split needing what the pass needs, nif_material.rs `skin_split_applies`).
 #[derive(Resource)]
@@ -270,7 +270,7 @@ fn create_placeholder(device: &RenderDevice) -> AlbedoPlaceholder {
     }
 }
 
-/// Give the main camera's view bevy_pbr's `NvfSkinAlbedoBindings` (bindings 47-48), inserted
+/// Give the main camera's view bevy_pbr's `NvfSkinAlbedoBindings` (bindings 50-51), inserted
 /// only here as bevy_pbr requires; [`prepare`] points them at this frame's textures.
 fn extract_skin_albedo(
     mut commands: Commands,

@@ -33,7 +33,7 @@ var<private> nvf_skin_last_diffuse: vec3<f32>;
 // Model for Acquiring and Rendering Human Skin"], so most of the colour is applied after the
 // blur and stays sharp; blurring A x E whole smeared the lips onto the chin. The skin's
 // fragments draw their diffuse light divided by A^(1-p) and write A^(1-p) (its square root,
-// for the dark end's precision in 8 bits) to binding 47 (bevy_pbr NvfSkinAlbedoBindings,
+// for the dark end's precision in 8 bits) to binding 50 (bevy_pbr NvfSkinAlbedoBindings,
 // sss/screen.rs), which the pass multiplies back in after the blur. Only a fragment that
 // will be seen writes: the storage write runs the shader for hidden fragments too, so its
 // depth is checked against the prepass's, as the main pass's equal test does
@@ -45,8 +45,8 @@ var<private> nvf_skin_last_diffuse: vec3<f32>;
 // nif_material.wesl `skin_strand_noise`, carried in `material.ior`) times NVF_MARK_STRAND;
 // hair (NVF_HAIR, `nvf_hair_mark`), 0. The pass shades the skin beside the hair with them
 // (sss_screen.wesl `hairline`).
-@if(NVF_SKIN_ALBEDO) @group(0) @binding(47) var nvf_skin_albedo: texture_storage_2d<rgba8unorm, write>;
-@if(NVF_SKIN_ALBEDO && NVF_SKIN_SPLIT) @group(0) @binding(48) var nvf_skin_spec_buf: texture_storage_2d<rgba16float, write>;
+@if(NVF_SKIN_ALBEDO) @group(0) @binding(50) var nvf_skin_albedo: texture_storage_2d<rgba8unorm, write>;
+@if(NVF_SKIN_ALBEDO && NVF_SKIN_SPLIT) @group(0) @binding(51) var nvf_skin_spec_buf: texture_storage_2d<rgba16float, write>;
 const NVF_SKIN_PRE_SCATTER: f32 = 0.12;
 const NVF_SKIN_ALBEDO_MIN: f32 = 0.01;
 const NVF_MARK_SKIN: f32 = 0.6;

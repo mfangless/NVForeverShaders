@@ -599,19 +599,37 @@ component; without it the layouts and shader defs are upstream's, and the pipeli
 the same keys numbered differently (the packed fields above the new bit moved up by one).
 As for the sun visibility, a meshlet view must not get the component.
 
+Another change (the bounce light's volume, #3009, docs/design/rtgi-volume.md), each part marked
+`NVForever RTGI volume`, for nvforever's `rtgi_volume.rs`, built the same way. nvforever inserts
+the component nowhere yet:
+
+- `src/render/mesh_view_bindings.rs`: the render-world view component `NvfRtgiVolumeBindings`
+  (a uniform buffer, a filterable float 3D texture and a filtering sampler), the layout key bit
+  `MeshPipelineViewLayoutKey::NVF_RTGI_VOLUME` (20) and bindings 47-49 of the mesh view bind
+  group, present only for a view with it. The entries are made by the public
+  `nvf_rtgi_layout_entries`, which the tests read.
+- `src/render/mesh.rs`: `MeshPipelineKey::NVF_RTGI_VOLUME` (bit 30; the packed fields above it
+  move up by one more and end at bit 51, still below the base mesh key's bits from 58), set by
+  `check_views_need_specialization` from the same component. No shader def follows from it:
+  nvf-assets' NIF material pushes `NVF_RTGI_VOLUME` for the pipelines that read the bindings.
+
+Bevy inserts no such component; without it the layouts and shader defs are upstream's, and the
+pipeline keys are the same keys numbered differently. A meshlet view must not get it.
+
 Another change (the skin's colour for the screen-space skin scattering, 2026-11-26,
 docs/design/graphics-enhanced.md, experimental), each part marked `NVForever skin colour`,
 for nvforever's `sss/screen.rs`, built the same way as the ambient occlusion's:
 
 - `src/render/mesh_view_bindings.rs`: the render-world view component
   `NvfSkinAlbedoBindings` (two write-only storage textures the size of the main texture:
-  `Rgba8Unorm` post-scatter albedo/mark at binding 47 and `Rgba16Float` HDR RGB specular
-  at binding 48), the layout key bit `MeshPipelineViewLayoutKey::NVF_SKIN_ALBEDO` and
-  bindings 47–48 of the mesh view bind group, present only for a view with it.
-- `src/render/mesh.rs`: `MeshPipelineKey::NVF_SKIN_ALBEDO` (bit 30; the bit fields above it
-  move up by one more, the colour target format then ending at bit 51, still below the base
-  mesh key's bits from 58), set by `check_views_need_specialization` from the same
-  component, and the shader def of the same name.
+  `Rgba8Unorm` post-scatter albedo/mark at binding 50 and `Rgba16Float` HDR RGB specular
+  at binding 51), the layout key bit `MeshPipelineViewLayoutKey::NVF_SKIN_ALBEDO` (21) and
+  bindings 50–51 of the mesh view bind group, present only for a view with it.
+- `src/render/mesh.rs`: `MeshPipelineKey::NVF_SKIN_ALBEDO` (bit 31, after the RTGI volume's
+  30, so the last flag; the bit fields above it move up by one more, the colour target format
+  then ending at bit 52, still below the base mesh key's bits from 58), set by
+  `check_views_need_specialization` from the same component, and the shader def of the same
+  name.
 
 The shader that writes the binding is nvforever's (`sss.wesl` `nvf_skin_post_scatter`,
 reached from the `sss/hook.rs` edits of `apply_pbr_lighting`), only in pipelines that also

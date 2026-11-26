@@ -4450,7 +4450,7 @@ Community Shaders code was read or used (the clean-room rule of #1503).
   strokes, as nif.md §6 "Hair strand direction" says.
 - **Hairline shade** (2026-11-26, with the screen-space skin pass): skin beside hair is
   shaded, warm (red least), in streaks. Hair fragments mark their pixels in the skin-colour
-  texture (sss.wesl `nvf_hair_mark`, binding 47, cleared each frame), skin fragments write
+  texture (sss.wesl `nvf_hair_mark`, binding 50, cleared each frame), skin fragments write
   a strand noise there (nif_material.wesl `skin_strand_noise`, in the head texture's
   space so it stays on the skin), and the vertical blur reads the hair's cover round each
   skin pixel at about its depth (sss_screen.wesl `hairline`), the strand noise widening

@@ -94,7 +94,7 @@ const SKIN_SPEC_TEXT: &str = "    @if(NVF_SKIN_SSS && NVF_SKIN_SPLIT)
 
 /// Physical PBR: the skin's mark in the picture's alpha, which the screen-space scattering
 /// reads and puts back to 1 (sss/screen.rs `SKIN_MARK`): -1.0 for skin; the full HDR RGB
-/// specular light is written to binding 48 (`nvf_skin_spec_buf`), and the diffuse share is
+/// specular light is written to binding 51 (`nvf_skin_spec_buf`), and the diffuse share is
 /// written to the main target divided by its post-scatter colour (`nvf_skin_post_scatter`).
 const TOTAL_ANCHOR: &str = "    output_color = vec4<f32>(
         (view_bindings::view.exposure * (transmitted_light + direct_light + indirect_light)) + emissive_light,
@@ -104,7 +104,7 @@ const TOTAL_ANCHOR: &str = "    output_color = vec4<f32>(
 const SKIN_MARK_TEXT: &str = "    @if(NVF_SKIN_SSS && NVF_SKIN_SPLIT)
     let nvf_skin_spec_hdr = view_bindings::view.exposure * nvf_skin_spec;
     // The diffuse share leaves with the colour's post-scatter part divided out, which the
-    // pass multiplies back in, while the exact HDR RGB specular goes to binding 48
+    // pass multiplies back in, while the exact HDR RGB specular goes to binding 51
     // (sss.wesl `nvf_skin_post_scatter`).
     @if(NVF_SKIN_SSS && NVF_SKIN_SPLIT)
     let nvf_skin_post = nvf_skin_post_scatter(in.frag_coord, diffuse_color, in.material.ior, nvf_skin_spec_hdr);

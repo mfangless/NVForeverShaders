@@ -86,7 +86,12 @@ root's ECS `Visibility` synchronized with `Rig::shown`.
 
 - **The clip** [observed]: `pipboy.kf` is one sequence `Pipboy`, 0.7333 s, clamped, with
   text keys `start` 0, `Blend: 8` 0.033, `Hit` 0.333, `end` 0.733. It drives
-  `Camera1st` (a small move, no turn) and both arms from the spine out. Measured on the
+  `Camera1st` (a small move, no turn) and both arms from the spine out. A replacement
+  clip of another length is played on the Pip-Boy's own (vanilla) clock: the raise maps
+  onto its start..`Hit`, the lowering onto `Hit`..its end, and with no `Hit` key the
+  vanilla share of it [design, #4492: a 0.067 s replacement, `Hit` at 0.033, held at
+  0.333 s sat past its end with the arm put away, observed in FadedLight's Nuclear Sunset
+  fork]. Measured on the
   arms rig, the screen's place before the eye through the clip:
 
   | seconds | screen against the eye |

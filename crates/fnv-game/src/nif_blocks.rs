@@ -235,6 +235,18 @@ impl SceneMirror {
         self.watched.contains(&r)
     }
 
+    /// Have the engine tell `r`'s trees from now on, before any script asks (the player:
+    /// a new game's first script question would otherwise find no tree and read 0).
+    pub fn watch(&mut self, r: FormId) {
+        self.watched.insert(r);
+    }
+
+    /// Whether the engine has told `r`'s tree for `view` (the player's first-person one
+    /// with separate player models).
+    pub fn has_tree(&self, r: FormId, view: ModelView) -> bool {
+        self.trees.contains_key(&(r, self.resolve_view(r, view)))
+    }
+
     /// The engine tells a watched reference's tree (parents before children).
     pub fn set_tree(&mut self, r: FormId, nodes: Vec<SceneNode>) {
         self.set_tree_for(r, ModelView::Reference, nodes);
