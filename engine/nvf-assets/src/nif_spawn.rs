@@ -1694,6 +1694,22 @@ fn classify_outfit_shape(props: &Props, diffuse: Option<&str>, alpha_mode: Alpha
     }
 }
 
+/// True for non-head skin shapes (`upperbody*`, `hand*`, or textureless worn body skin)
+/// so the shader can preserve anatomical normal relief, vascularity, and concavity AO
+/// on the neck, torso, arms, and legs without changing the calibrated head look.
+fn is_body_skin_shape(props: &Props, diffuse: Option<&str>) -> bool {
+    if !props.skin {
+        return false;
+    }
+    match diffuse {
+        Some(d) => {
+            let norm = d.replace('\\', "/").to_ascii_lowercase();
+            !norm.contains("head") && !norm.contains("ear")
+        }
+        None => true,
+    }
+}
+
 fn find_root(parent: &mut [usize], mut x: usize) -> usize {
     while parent[x] != x {
         parent[x] = parent[parent[x]];
@@ -2070,6 +2086,7 @@ fn shape_material_inner(props: &Props, mesh: &mut Mesh, textures: &mut impl Text
     }
     material.extension.decal = props.decal;
     material.extension.skin = props.skin;
+    material.extension.skin_body = is_body_skin_shape(props, diffuse.map(String::as_str));
     material.extension.foliage = foliage;
     material.extension.eye = props.eye;
     material.extension.hair = props.hair;
@@ -4303,5 +4320,11 @@ mod bc5_material_tests {
             classify_outfit_shape(&base, Some(r"textures\architecture\goodsprings\wood.dds"), AlphaMode::Opaque, false, false),
             OUTFIT_NONE
         );
+        assert!(is_body_skin_shape(&Props { skin: true, ..Default::default() }, Some(r"textures\characters\female\upperbodyfemale.dds")));
+        assert!(is_body_skin_shape(&Props { skin: true, ..Default::default() }, Some(r"textures\characters\female\handfemale.dds")));
+        assert!(is_body_skin_shape(&Props { skin: true, ..Default::default() }, None));
+        assert!(!is_body_skin_shape(&Props { skin: true, ..Default::default() }, Some(r"textures\characters\male\headhuman.dds")));
+        assert!(!is_body_skin_shape(&Props { skin: true, ..Default::default() }, Some(r"textures\characters\head\earshuman.dds")));
+        assert!(!is_body_skin_shape(&Props::default(), Some(r"textures\characters\female\upperbodyfemale.dds")));
     }
 }

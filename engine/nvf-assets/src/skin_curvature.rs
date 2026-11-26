@@ -28,20 +28,27 @@ pub const MM_PER_UNIT: f32 = 14.3;
 /// Positions closer than this (game units) are one vertex for the estimate.
 const WELD: f32 = 1e-3;
 
-/// Writes the curvature to `mesh`'s `UV_1`. Leaves a mesh that already has a `UV_1`, or
-/// has no positions or normals, as it was; returns whether it wrote.
+/// Writes curvature (x, mm⁻¹) and normalized anatomical concavity (y, 0..1) to `mesh`'s
+/// `UV_1`. Leaves a mesh that already has a `UV_1`, or has no positions or normals, as it
+/// was; returns whether it wrote.
 pub fn bake(mesh: &mut Mesh) -> bool {
     if mesh.attribute(Mesh::ATTRIBUTE_UV_1).is_some() {
         return false;
     }
-    let Some(curvature) = curvature_mm(mesh) else { return false };
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, curvature.into_iter().map(|k| [k, 0.0]).collect::<Vec<[f32; 2]>>());
+    let Some(uv1) = curvature_and_concavity(mesh) else { return false };
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, uv1);
     true
 }
 
 /// The per-vertex curvature (mm⁻¹) of `mesh`, one value per vertex, or `None` without
 /// positions or normals of the same length.
 pub fn curvature_mm(mesh: &Mesh) -> Option<Vec<f32>> {
+    curvature_and_concavity(mesh).map(|uv| uv.into_iter().map(|c| c[0]).collect())
+}
+
+/// Per-vertex unsigned curvature (mm⁻¹) and normalized concavity `[0, 1]` of `mesh`,
+/// or `None` without positions or normals of the same length.
+pub fn curvature_and_concavity(mesh: &Mesh) -> Option<Vec<[f32; 2]>> {
     let Some(VertexAttributeValues::Float32x3(positions)) = mesh.attribute(Mesh::ATTRIBUTE_POSITION) else { return None };
     let Some(VertexAttributeValues::Float32x3(normals)) = mesh.attribute(Mesh::ATTRIBUTE_NORMAL) else { return None };
     let count = positions.len();
@@ -76,6 +83,7 @@ pub fn curvature_mm(mesh: &Mesh) -> Option<Vec<f32>> {
 
     let n = pos.len();
     let mut sum = vec![0.0f32; n];
+    let mut signed_sum = vec![0.0f32; n];
     let mut edges = vec![0u32; n];
     let mut links: Vec<(usize, usize)> = Vec::with_capacity(tris.len() * 3);
     for t in tris {
@@ -92,30 +100,46 @@ pub fn curvature_mm(mesh: &Mesh) -> Option<Vec<f32>> {
             if len2 < WELD * WELD {
                 continue;
             }
-            let k = ((nor[b] - nor[a]).dot(d) / len2).abs();
+            let signed_k = (nor[b] - nor[a]).dot(d) / len2;
+            let k = signed_k.abs();
             for v in [a, b] {
                 sum[v] += k;
+                signed_sum[v] += signed_k;
                 edges[v] += 1;
             }
             links.push((a, b));
         }
     }
     let raw: Vec<f32> = sum.iter().zip(&edges).map(|(s, &e)| if e > 0 { s / e as f32 } else { 0.0 }).collect();
+    let raw_signed: Vec<f32> = signed_sum.iter().zip(&edges).map(|(s, &e)| if e > 0 { s / e as f32 } else { 0.0 }).collect();
 
     // One smoothing step: half-way to the neighbours' mean.
     let mut near = vec![0.0f32; n];
+    let mut near_signed = vec![0.0f32; n];
     let mut near_count = vec![0u32; n];
     for &(a, b) in &links {
         near[a] += raw[b];
         near[b] += raw[a];
+        near_signed[a] += raw_signed[b];
+        near_signed[b] += raw_signed[a];
         near_count[a] += 1;
         near_count[b] += 1;
     }
-    let smooth: Vec<f32> = (0..n)
-        .map(|v| if near_count[v] > 0 { 0.5 * raw[v] + 0.5 * near[v] / near_count[v] as f32 } else { raw[v] })
+    let smooth: Vec<[f32; 2]> = (0..n)
+        .map(|v| {
+            let (k, sk) = if near_count[v] > 0 {
+                let inv = 1.0 / near_count[v] as f32;
+                (0.5 * raw[v] + 0.5 * near[v] * inv, 0.5 * raw_signed[v] + 0.5 * near_signed[v] * inv)
+            } else {
+                (raw[v], raw_signed[v])
+            };
+            let k_mm = k / MM_PER_UNIT;
+            let concav = ((-sk / MM_PER_UNIT) * 5.0).clamp(0.0, 1.0);
+            [k_mm, concav]
+        })
         .collect();
 
-    Some(weld.iter().map(|&w| smooth[w] / MM_PER_UNIT).collect())
+    Some(weld.iter().map(|&w| smooth[w]).collect())
 }
 
 #[cfg(test)]
@@ -191,5 +215,20 @@ mod tests {
         bare.remove_attribute(Mesh::ATTRIBUTE_NORMAL);
         assert!(!bake(&mut bare));
         assert!(bare.attribute(Mesh::ATTRIBUTE_UV_1).is_none());
+    }
+
+    #[test]
+    fn concave_mesh_bakes_positive_concavity_in_uv1_y() {
+        let mut concave = sphere(0.5, 8, 12);
+        if let Some(VertexAttributeValues::Float32x3(normals)) = concave.attribute_mut(Mesh::ATTRIBUTE_NORMAL) {
+            for n in normals.iter_mut() {
+                n[0] = -n[0];
+                n[1] = -n[1];
+                n[2] = -n[2];
+            }
+        }
+        assert!(bake(&mut concave));
+        let Some(VertexAttributeValues::Float32x2(uv)) = concave.attribute(Mesh::ATTRIBUTE_UV_1) else { panic!("no UV_1") };
+        assert!(uv.iter().all(|c| c[0] > 0.0 && c[1] > 0.0), "inward sphere has positive concavity: {:?}", &uv[0]);
     }
 }

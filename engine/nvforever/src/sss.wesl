@@ -150,6 +150,7 @@ const NVF_SKIN_PENUMBRA_SIGMA: vec3<f32> = vec3(0.34, 0.11, 0.05);
 // (nvf_skin_eval; Penner & Borshukov 2011 §2.4) [hypothesis: skin research notes
 // 2026-11-26 §1.3; the earlier 0.08, 0.04, 0 left the pores shading as dark grit].
 const NVF_SKIN_NORMAL_SMOOTH: vec3<f32> = vec3(0.80, 0.50, 0.20);
+const NVF_SKIN_BODY_NORMAL_SMOOTH: vec3<f32> = vec3(0.32, 0.18, 0.06);
 
 // NVF_SKIN_SPLIT: the screen-space pass (sss/screen.rs) blurs the skin's light afterwards,
 // so the pre-integration's wrap and the penumbra's bleed here are kept at this share of
@@ -265,6 +266,7 @@ struct NvfSkinSky {
     ranges: ptr<function, ClusterableObjectIndexRanges>,
     found_diffuse_indirect: bool,
     world_normal: vec3<f32>,
+    skin_body: f32,
 ) -> NvfSkinSky {
     var out: NvfSkinSky;
     let base = (*input).layers[LAYER_BASE];
@@ -277,7 +279,8 @@ struct NvfSkinSky {
     var smooth_layer = base;
     smooth_layer.N = nvf_sss_safe_normalize(world_normal, base.N);
     let at_ng = compute_radiances(smooth_layer, ranges, (*input).P, found_diffuse_indirect);
-    let irr = mix(at_n.irradiance, at_ng.irradiance, NVF_SKIN_NORMAL_SMOOTH);
+    let smooth_w = mix(NVF_SKIN_NORMAL_SMOOTH, NVF_SKIN_BODY_NORMAL_SMOOTH, saturate(skin_body));
+    let irr = mix(at_n.irradiance, at_ng.irradiance, smooth_w);
     let ok = at_n.irradiance > vec3(1e-6);
     out.diffuse_scale = select(vec3(1.0), clamp(irr / max(at_n.irradiance, vec3(1e-6)), vec3(0.0), vec3(4.0)), ok);
     let fab = F_AB(r_oil, max(base.NdotV, 0.0001));
@@ -362,16 +365,17 @@ fn nvf_skin_eval(
     macro_vis: f32,
     light_rad: vec3<f32>,
     physical: bool,
+    skin_body: f32,
 ) -> vec3<f32> {
     let ng = nvf_sss_safe_normalize(world_normal, N);
     // Scattering under the skin smooths the light over the normal map's pores and bumps,
     // red most (Penner & Borshukov 2011 §2.4, "scattering applied to normal maps"); the
-    // specular lobes keep the normal map's N whole. Under NVF_SKIN_SPLIT too: the screen
-    // blur's inner taps fall inside one pixel at a conversation's distance and leave the
-    // sub-millimetre grain alone [hypothesis: skin research notes 2026-11-26 §1.3].
-    let n_r = nvf_sss_safe_normalize(mix(N, ng, NVF_SKIN_NORMAL_SMOOTH.r), ng);
-    let n_g = nvf_sss_safe_normalize(mix(N, ng, NVF_SKIN_NORMAL_SMOOTH.g), ng);
-    let n_b = nvf_sss_safe_normalize(mix(N, ng, NVF_SKIN_NORMAL_SMOOTH.b), N);
+    // specular lobes keep the normal map's N whole. Head skin smooths facial pores strongly;
+    // body skin keeps lower smoothing so neck tendons and muscle relief remain crisp.
+    let smooth_w = mix(NVF_SKIN_NORMAL_SMOOTH, NVF_SKIN_BODY_NORMAL_SMOOTH, saturate(skin_body));
+    let n_r = nvf_sss_safe_normalize(mix(N, ng, smooth_w.r), ng);
+    let n_g = nvf_sss_safe_normalize(mix(N, ng, smooth_w.g), ng);
+    let n_b = nvf_sss_safe_normalize(mix(N, ng, smooth_w.b), N);
     let ndotl_rgb = vec3(dot(n_r, L), dot(n_g, L), dot(n_b, L));
     let s = saturate(shadow);
     // NVF_SKIN_SPLIT: the screen-space pass blurs this light across the skin as well, so
@@ -445,6 +449,7 @@ fn nvf_sss_clustered_skin(
     is_spot: bool,
     is_display: bool,
     physical: bool,
+    skin_body: f32,
 ) -> vec3<f32> {
     let light = &view_bindings::clustered_lights.data[light_id];
     let to_light = (*light).position_radius.xyz - P;
@@ -457,7 +462,7 @@ fn nvf_sss_clustered_skin(
     let light_rad = nvf_sss_light_radiance((*light).color_inverse_square_range.rgb, is_display, physical) * attenuation * select(1.0, 1.10, physical);
     return nvf_skin_eval(
         N, world_normal, V, L, diffuse_color, F0_dielectric, perceptual_roughness,
-        curvature_mm, shadow, -1.0, shadow, light_rad, physical,
+        curvature_mm, shadow, -1.0, shadow, light_rad, physical, skin_body,
     );
 }
 
@@ -474,10 +479,11 @@ fn nvf_sss_point_skin(
     shadow: f32,
     is_display: bool,
     physical: bool,
+    skin_body: f32,
 ) -> vec3<f32> {
     return nvf_sss_clustered_skin(
         light_id, P, N, world_normal, V, diffuse_color, F0_dielectric, perceptual_roughness,
-        curvature_mm, shadow, false, is_display, physical,
+        curvature_mm, shadow, false, is_display, physical, skin_body,
     );
 }
 
@@ -494,10 +500,11 @@ fn nvf_sss_spot_skin(
     shadow: f32,
     is_display: bool,
     physical: bool,
+    skin_body: f32,
 ) -> vec3<f32> {
     return nvf_sss_clustered_skin(
         light_id, P, N, world_normal, V, diffuse_color, F0_dielectric, perceptual_roughness,
-        curvature_mm, shadow, true, is_display, physical,
+        curvature_mm, shadow, true, is_display, physical, skin_body,
     );
 }
 
@@ -517,6 +524,7 @@ fn nvf_sss_directional_skin(
     macro_vis: f32,
     is_display: bool,
     physical: bool,
+    skin_body: f32,
 ) -> vec3<f32> {
     let light = &view_bindings::lights.directional_lights[light_id];
     let L = (*light).direction_to_light.xyz;
@@ -532,7 +540,7 @@ fn nvf_sss_directional_skin(
     }
     return nvf_skin_eval(
         N, world_normal, V, L, diffuse_color, F0_dielectric, perceptual_roughness,
-        curvature_mm, shadow, thickness_mm, macro_vis, light_rad, physical,
+        curvature_mm, shadow, thickness_mm, macro_vis, light_rad, physical, skin_body,
     );
 }
 
@@ -829,9 +837,9 @@ fn nvf_charlie_v(ndotv: f32, ndotl: f32) -> f32 {
 }
 
 fn nvf_cloth_sheen_color(diffuse_color: vec3<f32>) -> vec3<f32> {
-    let luma = max(dot(diffuse_color, vec3(0.2126, 0.7152, 0.0722)), 1e-4);
-    let tint = clamp(diffuse_color / luma, vec3(0.5), vec3(1.6));
-    return mix(vec3(0.85), tint * 0.45 + vec3(0.45), 0.55);
+    let luma = dot(diffuse_color, vec3(0.2126, 0.7152, 0.0722));
+    let lifted = diffuse_color * 0.75 + vec3(sqrt(max(luma, 0.0)) * 0.25);
+    return clamp(lifted, vec3(0.02), vec3(0.65));
 }
 
 fn nvf_outfit_sheen_eval(
@@ -856,7 +864,7 @@ fn nvf_outfit_sheen_eval(
     let d = nvf_charlie_d(NVF_CLOTH_SHEEN_ROUGH, ndoth);
     let v = nvf_charlie_v(ndotv, max(ndotl, 0.05));
     let sheen_col = nvf_cloth_sheen_color(diffuse_color);
-    return sheen_col * (sheen_strength * d * v * wrap_ndl * s * 0.35) * light_rad;
+    return sheen_col * (sheen_strength * d * v * wrap_ndl * s * 0.24) * light_rad;
 }
 
 fn nvf_sss_clustered_outfit(
@@ -881,7 +889,7 @@ fn nvf_sss_clustered_outfit(
     if is_spot {
         attenuation *= nvf_sss_spot_attenuation(light_id, L);
     }
-    let light_rad = nvf_sss_light_radiance((*light).color_inverse_square_range.rgb, is_display, true) * (attenuation * PI);
+    let light_rad = nvf_sss_light_radiance((*light).color_inverse_square_range.rgb, is_display, true) * attenuation;
     return nvf_outfit_sheen_eval(N, V, L, diffuse_color, sheen_strength, shadow, light_rad);
 }
 
@@ -895,16 +903,15 @@ fn nvf_sss_spot_outfit(light_id: u32, P: vec3<f32>, N: vec3<f32>, V: vec3<f32>, 
 
 fn nvf_sss_directional_outfit(light_id: u32, N: vec3<f32>, V: vec3<f32>, diffuse_color: vec3<f32>, sheen_strength: f32, shadow: f32) -> vec3<f32> {
     let light = &view_bindings::lights.directional_lights[light_id];
-    return nvf_outfit_sheen_eval(N, V, (*light).direction_to_light.xyz, diffuse_color, sheen_strength, shadow, (*light).color.rgb);
+    return nvf_outfit_sheen_eval(N, V, (*light).direction_to_light.xyz, diffuse_color, sheen_strength, shadow, (*light).color.rgb * (1.0 / PI));
 }
 
 fn nvf_outfit_sheen_sky(NdotV: f32, diffuse_color: vec3<f32>, sheen_strength: f32, env_diffuse: vec3<f32>) -> vec3<f32> {
     if sheen_strength <= 0.001 {
         return vec3(0.0);
     }
-    let grazing = pow(1.0 - saturate(NdotV), 3.0);
-    let e_charlie = 0.08 + 0.55 * grazing;
+    let grazing = pow(1.0 - saturate(NdotV), 4.0);
     let sheen_col = nvf_cloth_sheen_color(diffuse_color);
-    let sky_irrad = min(env_diffuse / max(diffuse_color, vec3(0.05)), vec3(4.0));
-    return sheen_col * sky_irrad * (sheen_strength * e_charlie * 0.45);
+    let sky_irrad = min(env_diffuse / max(diffuse_color, vec3(0.06)), vec3(3.0));
+    return sheen_col * sky_irrad * (sheen_strength * grazing * 0.35);
 }

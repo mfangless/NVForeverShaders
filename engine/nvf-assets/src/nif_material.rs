@@ -750,6 +750,9 @@ pub struct NifSurface {
     /// 1 leather, 2 cloth, 3 metal), packed into `NifSurfaceUniform.terrain.z` and enabling
     /// `NVF_OUTFIT` under physical PBR.
     pub outfit_kind: f32,
+    /// True for body/hand skin shapes (`nif_spawn::is_body_skin_shape`), packed into
+    /// `NifSurfaceUniform.terrain.w` so body skin keeps anatomical muscle relief and grain.
+    pub skin_body: bool,
 }
 
 /// What a blended shape's solid core ([`NifSurface::solid_core`]) is made from: its base
@@ -784,7 +787,8 @@ pub struct NifSurfaceUniform {
     pub pipboy_b: Vec4,
     /// x [`NifSurface::terrain_repeat`] (0 when it cannot place anti-tiled reads); y
     /// [`NifSurface::metal_gain`] (#2981; read only by the opted-in main pass of a view with
-    /// a reflection cube, on authored materials); z, w unused.
+    /// a reflection cube, on authored materials); z [`NifSurface::outfit_kind`]; w
+    /// [`NifSurface::skin_body`] (1 body skin, 0 head/other).
     pub terrain: Vec4,
     /// [`NifSurface::env`], [`NifSurface::env_how`].
     pub env: Vec4,
@@ -800,7 +804,7 @@ pub const REFRACTION_SCREEN: f32 = 0.1;
 
 impl From<&NifSurface> for NifSurfaceUniform {
     fn from(s: &NifSurface) -> Self {
-        NifSurfaceUniform { falloff: s.falloff, alpha_cut: s.alpha_cut, add_whole: s.add_whole, refraction: s.refraction * REFRACTION_SCREEN, fire_period: s.fire_period, emissive_rule: s.emissive_rule, holes: s.holes, holes_edge: s.holes_edge, soft: s.soft, pipboy_a: s.pipboy_a, pipboy_b: s.pipboy_b, terrain: Vec4::new(if crate::terrain_sampling::repeat_valid(s.terrain_repeat) { s.terrain_repeat } else { 0.0 }, s.metal_gain, s.outfit_kind, 0.0), env: s.env, env_how: s.env_how }
+        NifSurfaceUniform { falloff: s.falloff, alpha_cut: s.alpha_cut, add_whole: s.add_whole, refraction: s.refraction * REFRACTION_SCREEN, fire_period: s.fire_period, emissive_rule: s.emissive_rule, holes: s.holes, holes_edge: s.holes_edge, soft: s.soft, pipboy_a: s.pipboy_a, pipboy_b: s.pipboy_b, terrain: Vec4::new(if crate::terrain_sampling::repeat_valid(s.terrain_repeat) { s.terrain_repeat } else { 0.0 }, s.metal_gain, s.outfit_kind, if s.skin_body { 1.0 } else { 0.0 }), env: s.env, env_how: s.env_how }
     }
 }
 
@@ -884,6 +888,7 @@ impl Default for NifSurface {
             eye: false,
             hair: false,
             outfit_kind: 0.0,
+            skin_body: false,
         }
     }
 }

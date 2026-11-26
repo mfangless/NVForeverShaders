@@ -588,14 +588,14 @@ const BODY_CLEARANCE: f32 = 24.0;
 const SKIN_STRAND_U: f32 = 400.0;
 const SKIN_STRAND_V: f32 = 60.0;
 
-@if(NVF_SKIN_SSS && !PREPASS_PIPELINE) fn skin_strand_hash(c: vec2<i32>) -> f32 {
+@if((NVF_SKIN_SSS || NVF_OUTFIT) && !PREPASS_PIPELINE) fn skin_strand_hash(c: vec2<i32>) -> f32 {
     var h = (bitcast<u32>(c.x) * 1597334677u) ^ (bitcast<u32>(c.y) * 3812015801u);
     h = h * 0x27d4eb2du;
     h = h ^ (h >> 15u);
     return f32(h) * (1.0 / 4294967295.0);
 }
 
-@if(NVF_SKIN_SSS && !PREPASS_PIPELINE) fn skin_value_noise(p: vec2<f32>) -> f32 {
+@if((NVF_SKIN_SSS || NVF_OUTFIT) && !PREPASS_PIPELINE) fn skin_value_noise(p: vec2<f32>) -> f32 {
     let i = vec2<i32>(floor(p));
     let f = fract(p);
     let w = f * f * (3.0 - 2.0 * f);
@@ -604,6 +604,30 @@ const SKIN_STRAND_V: f32 = 60.0;
     let c = skin_strand_hash(i + vec2(0, 1));
     let d = skin_strand_hash(i + vec2(1, 1));
     return mix(mix(a, b, w.x), mix(c, d, w.x), w.y);
+}
+
+@if((NVF_SKIN_SSS || NVF_OUTFIT) && VERTEX_UVS_A && !PREPASS_PIPELINE) fn micro_uv_bump(
+    uv: vec2<f32>,
+    freq: f32,
+    dp_dx: vec3<f32>,
+    dp_dy: vec3<f32>,
+    duv_dx: vec2<f32>,
+    duv_dy: vec2<f32>,
+    n: vec3<f32>,
+) -> vec4<f32> {
+    let p = uv * freq;
+    let c = skin_value_noise(p);
+    let gx = skin_value_noise(p + vec2(0.25, 0.0)) - c;
+    let gy = skin_value_noise(p + vec2(0.0, 0.25)) - c;
+    let dp2perp = cross(dp_dy, n);
+    let dp1perp = cross(n, dp_dx);
+    let det = dot(dp_dx, dp2perp);
+    if abs(det) < 1e-12 {
+        return vec4(0.0, 0.0, 0.0, c);
+    }
+    let grad_u = (dp2perp * duv_dx.x + dp1perp * duv_dy.x) / det;
+    let grad_v = (dp2perp * duv_dx.y + dp1perp * duv_dy.y) / det;
+    return vec4(-(grad_u * gx + grad_v * gy) * 4.0, c);
 }
 
 @if(NVF_SKIN_SSS && !PREPASS_PIPELINE) fn skin_strand_noise(uv: vec2<f32>) -> f32 {
@@ -862,6 +886,12 @@ fn nif_fragment(
     @if(NVF_HAIR && VERTEX_UVS_A && !PREPASS_PIPELINE) let hair_duv_dy = dpdy(hair_uv);
     @if(NVF_HAIR && VERTEX_UVS_A && !PREPASS_PIPELINE) let hair_dp_dx = dpdx(in.world_position.xyz);
     @if(NVF_HAIR && VERTEX_UVS_A && !PREPASS_PIPELINE) let hair_dp_dy = dpdy(in.world_position.xyz);
+    // Micro-pore / fabric / leather grain derivatives captured in uniform control flow.
+    @if((NVF_SKIN_SSS || NVF_OUTFIT) && VERTEX_UVS_A && !PREPASS_PIPELINE) let detail_dp_dx = dpdx(in.world_position.xyz);
+    @if((NVF_SKIN_SSS || NVF_OUTFIT) && VERTEX_UVS_A && !PREPASS_PIPELINE) let detail_dp_dy = dpdy(in.world_position.xyz);
+    @if((NVF_SKIN_SSS || NVF_OUTFIT) && VERTEX_UVS_A && !PREPASS_PIPELINE) let detail_duv_dx = dpdx(in.uv);
+    @if((NVF_SKIN_SSS || NVF_OUTFIT) && VERTEX_UVS_A && !PREPASS_PIPELINE) let detail_duv_dy = dpdy(in.uv);
+    @if((NVF_SKIN_SSS || NVF_OUTFIT) && VERTEX_UVS_A && !PREPASS_PIPELINE) let detail_uv_fw = length(fwidth(in.uv));
     @if(VISIBILITY_RANGE_DITHER) visibility_range_dither(in.position, in.visibility_range_dither);
     let surface = nif_surface(in.instance_index);
     // NifSurface::pipboy_screen: the picture's texture coordinates and their change across a
@@ -931,6 +961,20 @@ fn nif_fragment(
             let skin_mask = normal_map_texel(in.instance_index, skin_mask_uv).a;
             skin_oil = select(SKIN_OIL_UNMASKED, smoothstep(0.03, 0.20, skin_mask), (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_SPECULAR_TEXTURE_BIT) != 0u);
         }
+        let skin_is_body = surface.terrain.w > 0.5;
+        pbr_input.material.attenuation_distance = surface.terrain.w;
+        if skin_is_body {
+            // Preserve neck tendons, clavicles, and musculature on body meshes.
+            let skin_gn = normalize(pbr_input.world_normal);
+            let skin_ndg = dot(pbr_input.N, skin_gn);
+            let skin_dev = pbr_input.N - skin_gn * skin_ndg;
+            pbr_input.N = normalize(skin_gn * max(skin_ndg, 0.1) + skin_dev * 1.38);
+            @if(VERTEX_UVS_B) {
+                if in.uv_b.y < 0.05 && in.uv_b.x > 0.03 {
+                    skin_oil = saturate(skin_oil + 0.10 * smoothstep(0.03, 0.14, in.uv_b.x));
+                }
+            }
+        }
         // The hairline's strand noise for the screen-space pass (nvforever sss.wesl
         // `nvf_skin_post_scatter`), carried in `material.ior`, which skin does not use (Bevy
         // reads it only for specular transmission), as the curvature rides in `thickness`.
@@ -941,16 +985,28 @@ fn nif_fragment(
         let skin_w_oil = mix(0.10, 0.22, skin_oil);
         let skin_f0_base = 0.028 * (1.0 - skin_w_oil);
         pbr_input.material.reflectance = vec3(sqrt(skin_f0_base / 0.16));
-        let skin_roughness = mix(0.66, 0.52, skin_oil);
+        var skin_roughness = mix(0.66, 0.52, skin_oil);
+        @if(VERTEX_UVS_A) {
+            let skin_detail_fade = 1.0 - smoothstep(0.0007, 0.0038, detail_uv_fw);
+            let skin_bump = micro_uv_bump(in.uv, 420.0, detail_dp_dx, detail_dp_dy, detail_duv_dx, detail_duv_dy, pbr_input.N);
+            pbr_input.N = normalize(pbr_input.N + skin_bump.xyz * (select(0.012, 0.045, skin_is_body) * skin_detail_fade));
+            skin_roughness = clamp(skin_roughness + (skin_bump.w - 0.5) * select(0.02, 0.08, skin_is_body) * skin_detail_fade, 0.35, 0.85);
+        }
         pbr_input.material.perceptual_roughness = skin_roughness;
         let skin_pore = saturate(1.0 - dot(pbr_input.N, normalize(pbr_input.world_normal)));
         pbr_input.specular_occlusion = pbr_input.specular_occlusion * saturate(1.0 - 2.0 * skin_pore);
+        var skin_concav = 0.0;
+        @if(VERTEX_UVS_B) {
+            skin_concav = saturate(in.uv_b.y);
+        }
+        let skin_ao_w = select(skin_concav * 0.22, saturate(skin_concav * 0.65 + skin_pore * 1.15), skin_is_body);
+        pbr_input.diffuse_occlusion = pbr_input.diffuse_occlusion * mix(vec3(1.0), vec3(0.84, 0.72, 0.66), skin_ao_w);
     }
-    // NVF_OUTFIT (Pass A + Pass B under NVF_PHYSICAL_PBR): reinterprets un-authored vanilla
+    // NVF_OUTFIT (Pass A + B + C under NVF_PHYSICAL_PBR): reinterprets un-authored vanilla
     // outfit/armor normal-alpha specular masks into physical roughness, clamped dielectric
     // F0 (> 0.02 so shadowed regions keep sky Fresnel), Kaplanyan & Hill (2016) Specular AA,
-    // wrinkle cavity occlusion, metallic hardware / env-mask separation, and cloth sheen
-    // strength carried in `material.thickness` for `sss.wesl` Charlie sheen.
+    // wrinkle cavity/fold AO, procedural micro-grain (leather pebble / cloth twill / brushed
+    // metal), metallic hardware / env-mask separation, and cloth sheen strength in `thickness`.
     @if(NVF_OUTFIT && NVF_PHYSICAL_PBR && !PREPASS_PIPELINE) {
         let outfit_dndx = dpdx(pbr_input.N);
         let outfit_dndy = dpdy(pbr_input.N);
@@ -976,32 +1032,61 @@ fn nif_fragment(
             var f0_out = 0.04;
             var outfit_metal = 0.0;
             var cav_occ = 1.0;
+            var m_ao = 1.0;
             var cloth_sheen = 0.0;
+            var detail_fade = 0.0;
+            @if(VERTEX_UVS_A) {
+                detail_fade = 1.0 - smoothstep(0.0008, 0.0045, detail_uv_fw);
+            }
             if outfit_class < 1.5 {
                 // Leather / hide / biker / raider armor: worn ridges glisten, folds stay matte,
-                // achromatic bright mask patches separate steel buckles/studs/knee plates.
+                // only bright achromatic high-mask hardware (buckles/studs) becomes metallic.
                 let m = smoothstep(0.08, 0.85, outfit_mask);
+                m_ao = m;
                 r_out = mix(0.84, 0.38, m);
                 f0_out = mix(0.032, 0.046, m);
-                let metal_det = smoothstep(0.32, 0.65, outfit_mask)
-                    * (1.0 - smoothstep(0.16, 0.32, outfit_sat))
-                    * smoothstep(0.035, 0.10, outfit_lum);
-                outfit_metal = metal_det * 0.82;
+                let metal_det = smoothstep(0.55, 0.82, outfit_mask)
+                    * (1.0 - smoothstep(0.08, 0.18, outfit_sat))
+                    * smoothstep(0.10, 0.22, outfit_lum);
+                outfit_metal = metal_det * 0.65;
                 r_out = mix(r_out, mix(0.46, 0.24, m), outfit_metal);
                 cav_occ = mix(0.45, 1.0, m) * saturate(1.0 - 1.4 * outfit_tilt);
-                cloth_sheen = 0.12 * (1.0 - m) * (1.0 - outfit_metal);
+                cloth_sheen = 0.0;
+                @if(VERTEX_UVS_A) {
+                    let leather_bump = micro_uv_bump(outfit_uv, 220.0, detail_dp_dx, detail_dp_dy, detail_duv_dx, detail_duv_dy, pbr_input.N);
+                    pbr_input.N = normalize(pbr_input.N + leather_bump.xyz * (0.075 * detail_fade * (1.0 - outfit_metal)));
+                    r_out = clamp(r_out + (leather_bump.w - 0.5) * 0.14 * detail_fade, 0.16, 0.96);
+                }
             } else if outfit_class < 2.5 {
-                // Cloth / Vault suits / coats / shirts: matte woven diffuse + Charlie fuzz.
+                // Cloth / Vault suits / coats / shirts: woven twill detail + Charlie fuzz,
+                // metallic only if the shape actually carries an FNV env mask.
                 let m = smoothstep(0.06, 0.75, outfit_mask);
+                m_ao = m;
                 r_out = mix(0.94, 0.70, m);
                 f0_out = mix(0.024, 0.038, m);
-                let metal_det = smoothstep(0.50, 0.80, outfit_mask)
-                    * (1.0 - smoothstep(0.18, 0.35, outfit_sat))
-                    * smoothstep(0.05, 0.14, outfit_lum);
-                outfit_metal = metal_det * 0.75;
-                r_out = mix(r_out, mix(0.44, 0.28, m), outfit_metal);
+                @if(!NIF_SURFACE_BLEND && VERTEX_UVS_A) {
+                    if surface.env.y > 0.5 && surface.env.y < 1.5 {
+                        outfit_metal = smoothstep(0.30, 0.75, outfit_env_m) * 0.70;
+                        r_out = mix(r_out, mix(0.44, 0.28, m), outfit_metal);
+                    }
+                }
                 cav_occ = mix(0.55, 1.0, m) * saturate(1.0 - 1.1 * outfit_tilt);
-                cloth_sheen = (0.58 * (1.0 - 0.65 * m)) * (1.0 - outfit_metal);
+                cloth_sheen = (0.48 * (1.0 - 0.65 * m)) * (1.0 - outfit_metal);
+                @if(VERTEX_UVS_A) {
+                    let weave_p = outfit_uv * 280.0 * 6.2831853;
+                    let w_u = sin(weave_p.x);
+                    let w_v = sin(weave_p.y);
+                    let dp2perp = cross(detail_dp_dy, pbr_input.N);
+                    let dp1perp = cross(pbr_input.N, detail_dp_dx);
+                    let det = dot(detail_dp_dx, dp2perp);
+                    if abs(det) >= 1e-12 {
+                        let gu = (dp2perp * detail_duv_dx.x + dp1perp * detail_duv_dy.x) / det;
+                        let gv = (dp2perp * detail_duv_dx.y + dp1perp * detail_duv_dy.y) / det;
+                        let weave_dir = gu * cos(weave_p.x) + gv * cos(weave_p.y);
+                        pbr_input.N = normalize(pbr_input.N - weave_dir * (0.045 * detail_fade * (1.0 - outfit_metal)));
+                    }
+                    r_out = clamp(r_out + (w_u * w_v) * 0.05 * detail_fade, 0.20, 0.98);
+                }
             } else {
                 // Metal / env-masked armor (Power Armor, Combat Armor, Metal Armor, Riot Gear).
                 var has_env_mask = false;
@@ -1013,11 +1098,18 @@ fn nif_fragment(
                     }
                 }
                 let metal_mask = select(smoothstep(0.25, 0.72, outfit_mask), smoothstep(0.12, 0.70, env_m), has_env_mask);
+                m_ao = metal_mask;
                 outfit_metal = metal_mask * 0.85;
                 r_out = mix(0.76, 0.28, metal_mask);
                 f0_out = 0.04;
                 cav_occ = mix(0.50, 1.0, metal_mask) * saturate(1.0 - 1.3 * outfit_tilt);
-                cloth_sheen = 0.18 * (1.0 - metal_mask);
+                cloth_sheen = 0.14 * (1.0 - metal_mask);
+                pbr_input.material.base_color = vec4(mix(outfit_rgb, max(outfit_rgb, vec3(0.14)), outfit_metal * 0.65), pbr_input.material.base_color.a);
+                @if(VERTEX_UVS_A) {
+                    let scratch = skin_value_noise(outfit_uv * vec2(320.0, 48.0)) - 0.5;
+                    let edge_burnish = smoothstep(0.05, 0.25, outfit_tilt) * metal_mask;
+                    r_out = clamp(r_out + scratch * 0.12 * detail_fade - edge_burnish * 0.06, 0.18, 0.95);
+                }
             }
             let a_aa = r_out * r_out;
             let a_filtered = sqrt(clamp(a_aa * a_aa + clamp(0.25 * outfit_n_var, 0.0, 0.18), 0.002, 1.0));
@@ -1025,6 +1117,8 @@ fn nif_fragment(
             pbr_input.material.reflectance = vec3(sqrt(f0_out / 0.16));
             pbr_input.material.metallic = outfit_metal;
             pbr_input.specular_occlusion = pbr_input.specular_occlusion * cav_occ;
+            let fold_ao = mix(0.76, 1.0, saturate(1.0 - 1.25 * outfit_tilt)) * mix(0.90, 1.0, m_ao);
+            pbr_input.diffuse_occlusion = pbr_input.diffuse_occlusion * fold_ao;
             pbr_input.material.thickness = cloth_sheen;
         }
     }
@@ -1085,6 +1179,20 @@ fn nif_fragment(
         @if(FACEGEN_TINT && VERTEX_UVS_A && VERTEX_COLORS) factor *= vin.color.rgb;
         let tinted = facegen_tint(texel, facegen_offset_at(in.instance_index, uv));
         pbr_input.material.base_color = vec4(pbr_input.material.base_color.rgb + factor * (tinted - texel), pbr_input.material.base_color.a);
+    }
+    // Procedural dermal vascularity & chromophore variation on body skin (breaking up flat
+    // neck/torso/limb peaches without altering calibrated head textures).
+    @if(NVF_SKIN_SSS && VERTEX_UVS_A && !PREPASS_PIPELINE) {
+        if surface.terrain.w > 0.5 {
+            let v_hb = (skin_value_noise(in.uv * 18.0) - 0.5) * 0.08;
+            let v_mel = (skin_value_noise(in.uv * 52.0 + vec2(11.3, 7.1)) - 0.5) * 0.06;
+            let chromo = vec3(
+                1.0 + v_hb + 0.4 * v_mel,
+                1.0 - 0.5 * v_hb + 0.15 * v_mel,
+                1.0 - 0.7 * v_hb - 0.5 * v_mel,
+            );
+            pbr_input.material.base_color = vec4(pbr_input.material.base_color.rgb * chromo, pbr_input.material.base_color.a);
+        }
     }
     @if(PIPBOY_SCREEN && VERTEX_UVS_A) if (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_BASE_COLOR_TEXTURE_BIT) != 0u {
         // NifSurface::pipboy_screen: base_color is material colour x vertex colour x texel;

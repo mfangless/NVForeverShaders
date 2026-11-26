@@ -73,7 +73,7 @@ const ENV_DIFFUSE_ANCHOR: &str = "    indirect_light += environment_light.diffus
 const ENV_DIFFUSE_SKIN_TEXT: &str = "    @if(!NVF_SKIN_SSS)
     indirect_light += environment_light.diffuse * nvf_ibl_diff_ao;
     @if(NVF_SKIN_SSS)
-    let nvf_skin_sky_light = nvf_skin_sky(environment_map_lighting_input, &clusterable_object_index_ranges, found_diffuse_indirect, in.world_normal);
+    let nvf_skin_sky_light = nvf_skin_sky(environment_map_lighting_input, &clusterable_object_index_ranges, found_diffuse_indirect, in.world_normal, in.material.attenuation_distance);
     @if(NVF_SKIN_SSS)
     indirect_light += environment_light.diffuse * nvf_skin_sky_light.diffuse_scale * nvf_ibl_diff_ao + nvf_skin_sky_light.sebum * nvf_ibl_spec_ao;
     @if(NVF_SKIN_SSS && NVF_SKIN_SPLIT)
@@ -130,7 +130,7 @@ fn clustered_sss_text(kind: &str, ao_var: &str, physical: bool) -> String {
         let nvf_skin_{ao_var}_ao = vec3(1.0);
         @if(NVF_SKIN_SSS)
         if enable_diffuse {{
-            direct_light += nvf_sss_{kind}_skin(light_id, in.world_position.xyz, in.N, in.world_normal, in.V, diffuse_color, lighting_input.F0_dielectric, perceptual_roughness, thickness, shadow, nvf_display, {p}) * nvf_skin_{ao_var}_ao;
+            direct_light += nvf_sss_{kind}_skin(light_id, in.world_position.xyz, in.N, in.world_normal, in.V, diffuse_color, lighting_input.F0_dielectric, perceptual_roughness, thickness, shadow, nvf_display, {p}, in.material.attenuation_distance) * nvf_skin_{ao_var}_ao;
             @if(NVF_SKIN_SSS && NVF_SKIN_SPLIT)
             nvf_skin_d_direct += nvf_skin_last_diffuse * nvf_skin_{ao_var}_ao;
         }}
@@ -207,7 +207,7 @@ fn directional_sss_text(physical: bool) -> String {
         let nvf_skin_macro_vis = select(1.0, nvf_sun_visibility(in.world_position.xyz, (*light).direction_to_light, 1.0, view_z), ((*light).flags & mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_NVF_OUTDOOR_SUN_BIT) != 0u);
         @if(NVF_SKIN_SSS)
         if enable_diffuse {{
-            direct_light += nvf_sss_directional_skin(i, in.world_position.xyz, in.N, in.world_normal, in.V, diffuse_color, lighting_input.F0_dielectric, perceptual_roughness, thickness, shadow, view_z, nvf_skin_has_shadow, nvf_skin_macro_vis, nvf_display, {p});
+            direct_light += nvf_sss_directional_skin(i, in.world_position.xyz, in.N, in.world_normal, in.V, diffuse_color, lighting_input.F0_dielectric, perceptual_roughness, thickness, shadow, view_z, nvf_skin_has_shadow, nvf_skin_macro_vis, nvf_display, {p}, in.material.attenuation_distance);
             @if(NVF_SKIN_SSS && NVF_SKIN_SPLIT)
             nvf_skin_d_direct += nvf_skin_last_diffuse;
         }}
