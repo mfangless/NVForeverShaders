@@ -1629,7 +1629,7 @@ mod tests {
     #[test]
     fn only_opaque_single_sampled_world_skin_takes_the_skin_split() {
         use bevy::render::render_resource::BlendState;
-        let skin = NifSurfaceKey { decal: false, refract: false, hard_edges: false, shade_light: false, facegen: true, depth_write: false, first_person: false, add_linear: false, pipboy_screen: false, anti_tiling: false, terrain_layer: false, skin: true, foliage: false, eye: false, hair: false };
+        let skin = NifSurfaceKey { decal: false, refract: false, hard_edges: false, shade_light: false, facegen: true, depth_write: false, first_person: false, add_linear: false, pipboy_screen: false, anti_tiling: false, terrain_layer: false, skin: true, foliage: false, eye: false, hair: false, soft: false, hdr: false };
         let view = MeshPipelineKey::DEPTH_PREPASS | MeshPipelineKey::VIEW_PROJECTION_PERSPECTIVE;
         let main = main_pipeline(1, None);
         assert!(skin_split_applies(true, &main, view, &skin, true), "a face in the world view");
