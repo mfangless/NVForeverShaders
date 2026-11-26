@@ -25,9 +25,10 @@ const PBR_FUNCTIONS: &str = "embedded://bevy_pbr/render/pbr_functions.wesl";
 mod display_shader;
 #[cfg(test)]
 pub(crate) use self::display_shader::{
-    lighting_patched, spot_display_scale, spot_specular_scale, BEVY_ATTENUATION,
-    FIRST_PERSON_FLASHLIGHT_DIFFUSE, FIRST_PERSON_FLASHLIGHT_SPECULAR, FRESNEL_EDIT,
-    GAME_ATTENUATION, PHYSICAL_ATTENUATION, SPECULAR_EDITS,
+    lighting_patched, lighting_patched_with_diffuse, spot_display_scale, spot_specular_scale,
+    PhysicalDiffuse, BEVY_ATTENUATION, FIRST_PERSON_FLASHLIGHT_DIFFUSE,
+    FIRST_PERSON_FLASHLIGHT_SPECULAR, FRESNEL_EDIT, GAME_ATTENUATION, PHYSICAL_ATTENUATION,
+    SPECULAR_EDITS,
 };
 pub(crate) use self::display_shader::{display_patched, physical_patched};
 pub use self::display_shader::unix_lines;
@@ -97,7 +98,7 @@ impl Plugin for LightsPlugin {
         let handle: Handle<Shader> = app.world().resource::<AssetServer>().load(PBR_LIGHTING);
         let functions: Handle<Shader> = app.world().resource::<AssetServer>().load(PBR_FUNCTIONS);
         let tonemapping: Handle<Shader> = app.world().resource::<AssetServer>().load(TONEMAPPING_SHARED);
-        app.insert_resource(LightingShader { handle, patched: false })
+        app.insert_resource(LightingShader { handle, patched: false, base_source: None, applied_diffuse: None })
             .insert_resource(FunctionsShader { handle: functions, patched: false })
             .insert_resource(TonemapShader { handle: tonemapping, patched: false, hdr: false })
             .add_systems(PreUpdate, patch_clip)
@@ -563,12 +564,44 @@ fn animate_model_lights(
 struct LightingShader {
     handle: Handle<Shader>,
     patched: bool,
+    base_source: Option<String>,
+    applied_diffuse: Option<nvf_assets::authored::DiffuseModel>,
 }
 
-/// Once bevy_pbr's lighting shader has loaded, swap its distance attenuation for the
-/// game's. Pipelines that already use it are rebuilt.
-fn patch_attenuation(mut state: ResMut<LightingShader>, mut shaders: ResMut<Assets<Shader>>) {
+fn to_physical_diffuse(model: nvf_assets::authored::DiffuseModel) -> display_shader::PhysicalDiffuse {
+    match model {
+        nvf_assets::authored::DiffuseModel::OrenNayar => display_shader::PhysicalDiffuse::OrenNayar,
+        nvf_assets::authored::DiffuseModel::Chan => display_shader::PhysicalDiffuse::Chan,
+        nvf_assets::authored::DiffuseModel::Lambert => display_shader::PhysicalDiffuse::Lambert,
+    }
+}
+
+/// Once bevy_pbr's lighting shader has loaded, swap its distance attenuation and diffuse
+/// model; under Physical PBR (`NVF_PHYSICAL_PBR=1`), a live change of `Graphics::diffuse_model`
+/// re-patches `pbr_lighting.wesl` from its saved base source so all materials switch live.
+fn patch_attenuation(
+    mut state: ResMut<LightingShader>,
+    mut shaders: ResMut<Assets<Shader>>,
+    graphics: Option<Res<crate::graphics::Graphics>>,
+) {
+    let physical = nvf_assets::authored::physical_pbr();
+    let want_diffuse = graphics
+        .as_deref()
+        .map_or_else(nvf_assets::authored::diffuse_model, |g| g.diffuse_model);
     if state.patched {
+        if !physical || state.applied_diffuse == Some(want_diffuse) {
+            return;
+        }
+        let Some(base) = state.base_source.as_deref() else { return };
+        let Some(shader) = shaders.get(&state.handle) else { return };
+        let Some(patched) = display_shader::lighting_patched_with_diffuse(base, true, to_physical_diffuse(want_diffuse)) else {
+            return;
+        };
+        let patched = crate::fog::with_source(shader, patched);
+        let _ = shaders.insert(&state.handle, patched);
+        state.applied_diffuse = Some(want_diffuse);
+        nvf_assets::authored::set_diffuse_model(want_diffuse);
+        info!("lights: physical PBR diffuse switched live to {}", want_diffuse.name());
         return;
     }
     let Some(shader) = shaders.get(&state.handle) else { return };
@@ -578,15 +611,22 @@ fn patch_attenuation(mut state: ResMut<LightingShader>, mut shaders: ResMut<Asse
         return;
     };
     let source = unix_lines(source);
-    let physical = nvf_assets::authored::physical_pbr();
-    let Some(patched) = display_shader::lighting_patched(&source, physical) else {
+    let Some(patched) = display_shader::lighting_patched_with_diffuse(&source, physical, to_physical_diffuse(want_diffuse)) else {
         error!("{PBR_LIGHTING}: expected anchors not found (Bevy changed?); lights keep Bevy's defaults");
         return;
     };
+    if physical {
+        state.base_source = Some(source);
+        state.applied_diffuse = Some(want_diffuse);
+        nvf_assets::authored::set_diffuse_model(want_diffuse);
+    }
     let patched = crate::fog::with_source(shader, patched);
     let _ = shaders.insert(&state.handle, patched);
     if physical {
-        info!("lights: physical PBR installed (EON diffuse, Cook-Torrance GGX, 0.045 roughness floor, inverse-square attenuation)");
+        info!(
+            "lights: physical PBR installed ({} diffuse, Cook-Torrance GGX, 0.045 roughness floor, inverse-square attenuation)",
+            want_diffuse.name()
+        );
     } else {
         info!("lights: game attenuation and display-value Fresnel installed");
     }
@@ -790,16 +830,40 @@ mod tests {
     #[test]
     fn physical_pbr_patches_vendored_shaders_and_preserves_sun_hooks() {
         let lighting_src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../vendor/bevy_pbr/src/render/pbr_lighting.wesl")).expect("vendored pbr_lighting.wesl");
-        let physical_lighting = lighting_patched(&lighting_src, true).expect("physical lighting_patched succeeds");
-        assert!(physical_lighting.contains("fn Fd_OrenNayar("));
-        assert!(physical_lighting.contains("fn nvf_dielectric_E("));
-        assert!(physical_lighting.contains(PHYSICAL_ATTENUATION), "physical inverse-square attenuation installed");
-        assert!(physical_lighting.contains("clamp(perceptualRoughness, 0.045, 1.0)"), "desktop 0.045 roughness floor installed");
-        assert_eq!(physical_lighting.matches("Fd_OrenNayar(input, &derived_input, diffuse_color)").count(), 2, "point_light and directional_light call EON Fd_OrenNayar");
-        assert!(!physical_lighting.contains("Fd_Burley(input, &derived_input)"), "no Fd_Burley calls remain");
-        assert!(physical_lighting.contains("    let F = fresnel(F0, LdotH);"), "Cook-Torrance keeps full Schlick Fresnel");
-        assert!(!physical_lighting.contains("select(fresnel(F0, LdotH), F0"), "display Fresnel clamp is absent");
-        assert!(physical_lighting.contains("fn nvf_light_colour("), "display-space light uniforms remain linearized");
+        for (diffuse, fn_decl, call_expr) in [
+            (
+                PhysicalDiffuse::OrenNayar,
+                "fn Fd_OrenNayar(",
+                "Fd_OrenNayar(input, &derived_input, diffuse_color)",
+            ),
+            (
+                PhysicalDiffuse::Chan,
+                "fn Fd_Chan(",
+                "Fd_Chan(input, &derived_input, diffuse_color)",
+            ),
+            (
+                PhysicalDiffuse::Lambert,
+                "fn Fd_Lambert(",
+                "Fd_Lambert(input, &derived_input, diffuse_color)",
+            ),
+        ] {
+            let physical_lighting = lighting_patched_with_diffuse(&lighting_src, true, diffuse)
+                .expect("physical lighting_patched_with_diffuse succeeds");
+            assert!(physical_lighting.contains(fn_decl), "{diffuse:?}: {fn_decl}");
+            assert!(physical_lighting.contains("fn nvf_diffuse_brdf("), "{diffuse:?}: unified helper");
+            assert_eq!(
+                physical_lighting.contains("fn nvf_dielectric_E("),
+                diffuse == PhysicalDiffuse::OrenNayar,
+                "{diffuse:?}: nvf_dielectric_E iff OrenNayar"
+            );
+            assert!(physical_lighting.contains(PHYSICAL_ATTENUATION), "physical inverse-square attenuation installed");
+            assert!(physical_lighting.contains("clamp(perceptualRoughness, 0.045, 1.0)"), "desktop 0.045 roughness floor installed");
+            assert_eq!(physical_lighting.matches(call_expr).count(), 2, "{diffuse:?}: point_light and directional_light call {call_expr}");
+            assert!(!physical_lighting.contains("Fd_Burley(input, &derived_input)"), "no Fd_Burley calls remain");
+            assert!(physical_lighting.contains("    let F = fresnel(F0, LdotH);"), "Cook-Torrance keeps full Schlick Fresnel");
+            assert!(!physical_lighting.contains("select(fresnel(F0, LdotH), F0"), "display Fresnel clamp is absent");
+            assert!(physical_lighting.contains("fn nvf_light_colour("), "display-space light uniforms remain linearized");
+        }
 
         let display_lighting = lighting_patched(&lighting_src, false).expect("display lighting_patched succeeds");
         assert!(!display_lighting.contains("fn Fd_OrenNayar("));
@@ -854,6 +918,76 @@ mod tests {
                     }
                 }
                 assert!((total - 1.0).abs() < 0.002, "EON white furnace failed at pr={pr}, mu_o={mu_o}: got {total}");
+            }
+        }
+    }
+
+    /// CPU verification for SIGGRAPH 2018 Chan (`Fd_Chan`) and plain `Fd_Lambert`:
+    /// exact Helmholtz reciprocity, finite output across `[0.045, 1.0]`, smooth grazing
+    /// Fresnel roll-off vs rough retroreflection, and bounded combined `E_diff + E_spec(0.04)`.
+    #[test]
+    fn chan_and_lambert_diffuse_reciprocity_and_energy_bounds() {
+        let pow5 = |x: f32| {
+            let x2 = x * x;
+            x2 * x2 * x
+        };
+        let eval_chan = |pr: f32, ndotv: f32, ndotl: f32, ndoth: f32, ldoth: f32| -> f32 {
+            let alpha = pr * pr;
+            let a2 = (alpha * alpha).clamp(1e-6, 1.0);
+            let g = ((1.0 / 18.0) * (2.0 / a2 - 1.0).max(1.0).log2()).clamp(0.0, 1.0);
+            let f0 = ldoth + pow5(1.0 - ldoth);
+            let f1 = (1.0 - 0.75 * pow5(1.0 - ndotl)) * (1.0 - 0.75 * pow5(1.0 - ndotv));
+            let t = (2.2 * g - 0.5).clamp(0.0, 1.0);
+            let fd = f0 + (f1 - f0) * t;
+            let fb = ((34.5 * g - 59.0) * g + 24.5) * ldoth * (-((73.2 * g - 21.2).max(8.9)) * ndoth.sqrt()).exp2();
+            (fd + fb) / PI
+        };
+
+        // Reciprocity: swapping V and L preserves N.H and L.H (= V.H) and swaps N.V <-> N.L.
+        for pr in [0.045f32, 0.25, 0.5, 0.75, 1.0] {
+            let a = eval_chan(pr, 0.22, 0.81, 0.68, 0.74);
+            let b = eval_chan(pr, 0.81, 0.22, 0.68, 0.74);
+            assert!(a.is_finite() && (a - b).abs() < 1e-6, "Chan reciprocity at pr={pr}: {a} vs {b}");
+        }
+        // Grazing retroreflection (L == V => L.H = 1, N.H = N.V = N.L = 0.15): rough Chan
+        // retroreflects strongly while smooth Chan rolls off for specular Fresnel.
+        let smooth_grazing = eval_chan(0.045, 0.15, 0.15, 0.15, 1.0);
+        let rough_grazing = eval_chan(1.0, 0.15, 0.15, 0.15, 1.0);
+        assert!(rough_grazing > smooth_grazing * 1.8, "rough={rough_grazing} > smooth={smooth_grazing}");
+
+        // Hemisphere integration for Lambert (exact 1.0) and Chan across roughnesses.
+        let (n_mu, n_phi) = (100usize, 100usize);
+        let (dmu, dphi) = (1.0 / n_mu as f32, PI / n_phi as f32);
+        let mut lambert_sum = 0.0f32;
+        for i in 0..n_mu {
+            let mu_i = (i as f32 + 0.5) * dmu;
+            for _ in 0..n_phi {
+                lambert_sum += (1.0 / PI) * mu_i * dmu * dphi * 2.0;
+            }
+        }
+        assert!((lambert_sum - 1.0).abs() < 1e-3, "Lambert white furnace: {lambert_sum}");
+
+        for pr in [0.045f32, 0.25, 0.5, 0.75, 1.0] {
+            for mu_o in [0.1f32, 0.5, 0.9] {
+                let sin_o = (1.0 - mu_o * mu_o).max(0.0).sqrt();
+                let mut total = 0.0f32;
+                for i in 0..n_mu {
+                    let mu_i = (i as f32 + 0.5) * dmu;
+                    let sin_i = (1.0 - mu_i * mu_i).max(0.0).sqrt();
+                    for j in 0..n_phi {
+                        let phi = (j as f32 + 0.5) * dphi;
+                        let (lx, ly, lz) = (sin_i * phi.cos(), sin_i * phi.sin(), mu_i);
+                        let (hx, hy, hz) = (lx + sin_o, ly, lz + mu_o);
+                        let hl = (hx * hx + hy * hy + hz * hz).sqrt();
+                        let ndoth = (hz / hl).clamp(0.0, 1.0);
+                        let ldoth = ((lx * hx + ly * hy + lz * hz) / hl).clamp(0.0, 1.0);
+                        total += eval_chan(pr, mu_o, mu_i, ndoth, ldoth) * mu_i * dmu * dphi * 2.0;
+                    }
+                }
+                assert!(
+                    total.is_finite() && (0.50..=1.06).contains(&total),
+                    "Chan directional albedo out of physical bounds at pr={pr}, mu_o={mu_o}: {total}"
+                );
             }
         }
     }

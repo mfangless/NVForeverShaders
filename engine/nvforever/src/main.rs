@@ -1919,11 +1919,17 @@ fn run_with_args(line: Vec<String>) -> AppExit {
     app.add_systems(Startup, move || info!("authored materials: {}", if authored { "on (sets under textures\\pbr\\ are used where a pack has them)" } else { "off (setting)" }));
     let physical_pbr = settings::physical_pbr_after_ini(graphics.physical_pbr, given_at_start.as_ref());
     nvf_assets::authored::set_physical_pbr(physical_pbr);
+    let diffuse_model = settings::diffuse_after_ini(graphics.diffuse_model, given_at_start.as_ref());
+    graphics.diffuse_model = diffuse_model;
+    nvf_assets::authored::set_diffuse_model(diffuse_model);
     let sss = settings::sss_after_ini(graphics.subsurface_scattering, given_at_start.as_ref());
     nvf_assets::authored::set_sss_enabled(sss);
     app.add_systems(Startup, move || {
         if physical_pbr {
-            info!("physical PBR: on (linear Oren-Nayar diffuse, Cook-Torrance specular, sky IBL, Beer-Lambert fog)");
+            info!(
+                "physical PBR: on (linear {} diffuse, Cook-Torrance specular, sky IBL, Beer-Lambert fog)",
+                diffuse_model.name()
+            );
         }
         if sss {
             info!("subsurface scattering: on (pre-integrated skin shading + backlit foliage translucency)");

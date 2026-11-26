@@ -1153,6 +1153,27 @@ fn register_graphics(app: &mut App) {
         Setting { key: CLOUDS_KEY, group: GROUP_GRAPHICS, label: "Volumetric clouds (experimental)", note: CLOUDS_NOTE, switches: "--graphics-only", get: |_| false, set: |_, _| {}, slider: None },
         ChoiceList { names: |_| CLOUD_CHOICES.iter().map(|c| (*c).to_string()).collect(), chosen: clouds_chosen, pick: take_clouds, save: clouds_chosen, load: take_clouds, ask_keep: false },
     );
+    add_choice_list(
+        app,
+        Setting {
+            key: crate::graphics::DIFFUSE_MODEL_KEY,
+            group: GROUP_GRAPHICS,
+            label: "Diffuse model",
+            note: DIFFUSE_MODEL_NOTE,
+            switches: "",
+            get: |_| false,
+            set: |_, _| {},
+            slider: None,
+        },
+        ChoiceList {
+            names: |_| nvf_assets::authored::DIFFUSE_CHOICES.iter().map(|c| (*c).to_string()).collect(),
+            chosen: diffuse_model_chosen,
+            pick: pick_diffuse_model,
+            save: diffuse_model_chosen,
+            load: load_diffuse_model,
+            ask_keep: false,
+        },
+    );
     let switches: [Switch; 29] = [
         (
             "fine-shadows",
@@ -1407,6 +1428,9 @@ fn register_graphics(app: &mut App) {
     // (gpu_occlusion.rs).
     crate::gpu_occlusion::add_row(app, GROUP_GRAPHICS);
     nvf_play::settings::set_needs_in_game(app, "terrain-parallax", |w| parallax_status(nvf_assets::authored::enabled(), w.get_resource::<Graphics>().is_some_and(|g| g.authored_materials)));
+    nvf_play::settings::set_needs_in_game(app, crate::graphics::DIFFUSE_MODEL_KEY, |w| {
+        diffuse_status(nvf_assets::authored::physical_pbr(), w.get_resource::<Graphics>().is_some_and(|g| g.physical_pbr))
+    });
     // #3032 stage 3: the light in the air's strength, 0 to 200 % in steps of 10 (greyed while
     // its switch is off: `settings_layout::NEEDS`); Sun shafts are greyed while the light is
     // wanted at a strength above 0 (they yield to it where it draws, shafts.rs): the game's page
@@ -1502,8 +1526,60 @@ pub(crate) fn authored_after_ini(command_line: bool, given: Option<&nvf_play::se
     nvf_play::settings::switch_after_ini(command_line, stored, given, AUTHORED_MATERIALS_SWITCHES)
 }
 
-pub(crate) const PHYSICAL_PBR_NOTE: &str = "On: linear Oren-Nayar diffuse, Cook-Torrance specular, sky IBL and Beer-Lambert fog instead of the original's display lighting. Takes effect at the next start.";
+pub(crate) const PHYSICAL_PBR_NOTE: &str = "On: linear rough diffuse, Cook-Torrance specular, sky IBL and Beer-Lambert fog instead of the original's display lighting. Takes effect at the next start.";
 pub(crate) const PHYSICAL_PBR_SWITCHES: &str = "--graphics-only";
+pub(crate) const DIFFUSE_MODEL_NOTE: &str = "How surfaces scatter direct light under Physical PBR: Oren-Nayar (EON), Chan (GGX multiscatter) or flat Lambert. Applies live without a restart.";
+pub(crate) const DIFFUSE_NEEDS: &str = "Needs Physical PBR Lighting.";
+pub(crate) const DIFFUSE_RESTART: &str = "After a restart (Physical PBR Lighting)";
+
+pub(crate) fn diffuse_status(session: bool, row: bool) -> Option<&'static str> {
+    match (session, row) {
+        (true, _) => None,
+        (false, true) => Some(DIFFUSE_RESTART),
+        (false, false) => Some(DIFFUSE_NEEDS),
+    }
+}
+
+fn diffuse_model_chosen(world: &World) -> String {
+    world.resource::<Graphics>().diffuse_model.name().to_string()
+}
+
+fn pick_diffuse_model(world: &mut World, text: &str) -> bool {
+    let Some(model) = nvf_assets::authored::DiffuseModel::parse(text) else { return false };
+    let mut g = world.resource_mut::<Graphics>();
+    if g.diffuse_model != model {
+        g.diffuse_model = model;
+    }
+    nvf_assets::authored::set_diffuse_model(model);
+    true
+}
+
+fn load_diffuse_model(world: &mut World, text: &str) -> bool {
+    if let Some(env_model) = nvf_assets::authored::DiffuseModel::from_env() {
+        world.resource_mut::<Graphics>().diffuse_model = env_model;
+        nvf_assets::authored::set_diffuse_model(env_model);
+        return true;
+    }
+    pick_diffuse_model(world, text)
+}
+
+/// Resolve `diffuse-model` at startup: `NVF_DIFFUSE` env var overrides, otherwise INI/default.
+pub(crate) fn diffuse_after_ini(
+    default: nvf_assets::authored::DiffuseModel,
+    given: Option<&nvf_play::settings::GivenSwitches>,
+) -> nvf_assets::authored::DiffuseModel {
+    if let Some(env_model) = nvf_assets::authored::DiffuseModel::from_env() {
+        return env_model;
+    }
+    if given.is_some() {
+        if let Some(stored) = stored_at_start(crate::graphics::DIFFUSE_MODEL_KEY)
+            .and_then(|v| nvf_assets::authored::DiffuseModel::parse(&v))
+        {
+            return stored;
+        }
+    }
+    default
+}
 pub(crate) const SUBSURFACE_SCATTERING_NOTE: &str = "On: pre-integrated skin shading with warm backlit translucency on characters and two-sided light transmission on foliage. Takes effect at the next start.";
 pub(crate) const SUBSURFACE_SCATTERING_SWITCHES: &str = "--graphics-only";
 pub(crate) const SSGI_NOTE: &str = "On: sunlit surfaces, neon signs and lamps bounce one hop of indirect colour and light onto nearby walls, ceilings and ground on the screen. Off in both presets. Not in the original.";
@@ -3472,6 +3548,55 @@ dlss-model=Preset K
         assert!(env_or_ini_switch(None, false, Some(true), Some(&play_default), "--graphics-only"));
         assert!(!env_or_ini_switch(None, false, None, Some(&play_default), "--graphics-only"));
         assert!(env_or_ini_switch(None, true, Some(false), None, "--graphics-only"));
+    }
+
+    #[test]
+    fn diffuse_model_row_parses_aliases_persists_in_ini_and_tracks_physical_pbr_status() {
+        use nvf_assets::authored::DiffuseModel;
+        let mut app = rows_app();
+        let i = row(&app, crate::graphics::DIFFUSE_MODEL_KEY);
+        let s = app.world().resource::<Settings>().list()[i];
+        assert_eq!((s.group, s.label, s.note, s.switches), (GROUP_GRAPHICS, "Diffuse model", DIFFUSE_MODEL_NOTE, ""));
+        assert_eq!(nvf_play::settings::note_over_budget(s.note), None);
+        assert_eq!(diffuse_model_chosen(app.world()), "Oren-Nayar");
+
+        for (input, want, name) in [
+            ("Chan", DiffuseModel::Chan, "Chan"),
+            ("lambert", DiffuseModel::Lambert, "Lambert"),
+            ("eon", DiffuseModel::OrenNayar, "Oren-Nayar"),
+            ("1", DiffuseModel::Chan, "Chan"),
+            ("0", DiffuseModel::OrenNayar, "Oren-Nayar"),
+            ("lambertian", DiffuseModel::Lambert, "Lambert"),
+            ("oren_nayar", DiffuseModel::OrenNayar, "Oren-Nayar"),
+        ] {
+            assert!(pick_diffuse_model(app.world_mut(), input), "{input}");
+            assert_eq!(app.world().resource::<Graphics>().diffuse_model, want);
+            assert_eq!(nvf_assets::authored::diffuse_model(), want);
+            assert_eq!(diffuse_model_chosen(app.world()), name);
+        }
+        assert!(!pick_diffuse_model(app.world_mut(), "phong"));
+        assert_eq!(app.world().resource::<Graphics>().diffuse_model, DiffuseModel::OrenNayar);
+
+        assert_eq!(diffuse_status(true, false), None);
+        assert_eq!(diffuse_status(true, true), None);
+        assert_eq!(diffuse_status(false, true), Some(DIFFUSE_RESTART));
+        assert_eq!(diffuse_status(false, false), Some(DIFFUSE_NEEDS));
+
+        let dir = std::env::temp_dir().join(format!("nvf-diffuse-model-row-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("NVForever.ini");
+        let loaded = ini_app(
+            &path,
+            "[Settings]\nphysical-pbr=1\ndiffuse-model=Chan\n",
+            UpscalerChoice::Off,
+            GivenSwitches::default(),
+        );
+        if DiffuseModel::from_env().is_none() {
+            assert_eq!(loaded.world().resource::<Graphics>().diffuse_model, DiffuseModel::Chan);
+        }
+        nvf_assets::authored::set_diffuse_model(DiffuseModel::OrenNayar);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A settings page with the INI at `path` holding `text`, `apply_stored` run once.

@@ -270,10 +270,14 @@ pub struct Graphics {
     /// Twinkling stars, a moon glow and moonlit clouds (night_sky.rs; off in every preset)
     /// [design, #2995].
     pub night_sky_detail: bool,
-    /// Linear Oren-Nayar diffuse, Cook-Torrance specular, sky IBL, and Beer-Lambert fog
-    /// (`NVF_PHYSICAL_PBR`; off in both presets). Read once at the start (nvf_assets
-    /// `authored::set_physical_pbr`, main.rs); this field holds the next start's choice.
+    /// Linear physical diffuse (`NVF_DIFFUSE`: Oren-Nayar, Chan, or Lambert), Cook-Torrance
+    /// specular, sky IBL, and Beer-Lambert fog (`NVF_PHYSICAL_PBR`; off in both presets).
+    /// Read once at the start (nvf_assets `authored::set_physical_pbr`, main.rs); this field
+    /// holds the next start's choice.
     pub physical_pbr: bool,
+    /// Active direct-light diffuse BRDF when Physical PBR is enabled (`NVF_DIFFUSE`;
+    /// live-switched across all materials without a restart).
+    pub diffuse_model: nvf_assets::authored::DiffuseModel,
     /// Pre-integrated skin shading and backlit foliage translucency (`NVF_SSS`; off in both
     /// presets). Read once at the start (nvf_assets `authored::set_sss_enabled`, main.rs);
     /// this field holds the next start's choice.
@@ -292,6 +296,8 @@ pub struct Graphics {
 pub const AUTHORED_MATERIALS_KEY: &str = "authored-materials";
 /// The settings key of the Physical PBR lighting row.
 pub const PHYSICAL_PBR_KEY: &str = "physical-pbr";
+/// The settings key of the Diffuse model row (under Physical PBR).
+pub const DIFFUSE_MODEL_KEY: &str = "diffuse-model";
 /// The settings key of the Subsurface scattering row.
 pub const SUBSURFACE_SCATTERING_KEY: &str = "subsurface-scattering";
 /// The settings key of the Screen-space global illumination row.
@@ -423,6 +429,7 @@ impl Graphics {
             night_sky_detail: false,
             // Opt-in physical lighting & SSS switches (restart required; `NVF_PHYSICAL_PBR` / `NVF_SSS`).
             physical_pbr: false,
+            diffuse_model: nvf_assets::authored::DiffuseModel::default(),
             subsurface_scattering: false,
             // Opt-in 1-bounce SSGI (live switch; `NVF_SSGI=1` / `0` / `debug` overrides).
             ssgi: false,

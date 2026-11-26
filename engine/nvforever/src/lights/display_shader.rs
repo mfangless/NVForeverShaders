@@ -84,6 +84,16 @@ fn getDistanceAttenuation(",
     ),
 ];
 
+/// Physical PBR direct-light diffuse BRDF selection (`NVF_DIFFUSE`). Kept `std`-only so
+/// `nvf-shader-tests` includes this module directly.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PhysicalDiffuse {
+    #[default]
+    OrenNayar,
+    Chan,
+    Lambert,
+}
+
 const OREN_NAYAR_FN: &str = "/// Single-scattering directional albedo factor G(mu) for OpenPBR EON (Portsmith JCGT 2025).
 fn nvf_eon_G(mu: f32) -> f32 {
     let x = 1.0 - saturate(mu);
@@ -102,15 +112,19 @@ fn nvf_dielectric_E(F0: vec3<f32>, perceptual_roughness: f32, mu: f32) -> vec3<f
 
 /// OpenPBR / Blender 4.3+ Energy-Conserving Oren-Nayar (EON) diffuse BRDF
 /// coupled with reciprocal multi-scatter dielectric Fresnel transmission.
-fn Fd_OrenNayar(
-    input: ptr<function, LightingInput>,
-    derived_input: ptr<function, DerivedLightingInput>,
+fn nvf_diffuse_brdf(
     diffuse_color: vec3<f32>,
+    perceptual_roughness: f32,
+    roughness: f32,
+    F0_dielectric: vec3<f32>,
+    NdotV_in: f32,
+    NdotL_in: f32,
+    NdotH: f32,
+    LdotH: f32,
 ) -> vec3<f32> {
-    let r = saturate((*input).layers[LAYER_BASE].perceptual_roughness);
-    let NdotV = max((*input).layers[LAYER_BASE].NdotV, 0.0001);
-    let NdotL = max((*derived_input).NdotL, 0.0001);
-    let LdotH = (*derived_input).LdotH;
+    let r = saturate(perceptual_roughness);
+    let NdotV = max(NdotV_in, 0.0001);
+    let NdotL = max(NdotL_in, 0.0001);
 
     // Fujii-improved qualitative Oren-Nayar single-scatter (trig-free via V.L = 2*(L.H)^2 - 1).
     let VdotL = clamp(2.0 * LdotH * LdotH - 1.0, -1.0, 1.0);
@@ -131,7 +145,7 @@ fn Fd_OrenNayar(
     let f_eon = f_ss + rho_ms * (ms_factor * (1.0 / PI));
 
     // Reciprocal Kulla-Conty / OpenPBR dielectric specular-diffuse energy coupling.
-    let F0_d = (*input).F0_dielectric;
+    let F0_d = F0_dielectric;
     let E_spec_o = nvf_dielectric_E(F0_d, r, NdotV);
     let E_spec_i = nvf_dielectric_E(F0_d, r, NdotL);
     // 3-point Gauss-Legendre on mu in [0, 1] for 2*mu*E_spec(mu).
@@ -142,32 +156,143 @@ fn Fd_OrenNayar(
     return f_eon * T_d;
 }
 
+fn Fd_OrenNayar(
+    input: ptr<function, LightingInput>,
+    derived_input: ptr<function, DerivedLightingInput>,
+    diffuse_color: vec3<f32>,
+) -> vec3<f32> {
+    return nvf_diffuse_brdf(
+        diffuse_color,
+        (*input).layers[LAYER_BASE].perceptual_roughness,
+        (*input).layers[LAYER_BASE].roughness,
+        (*input).F0_dielectric,
+        (*input).layers[LAYER_BASE].NdotV,
+        (*derived_input).NdotL,
+        (*derived_input).NdotH,
+        (*derived_input).LdotH,
+    );
+}
+
+";
+
+const CHAN_FN: &str = "fn nvf_pow5(x: f32) -> f32 {
+    let x2 = x * x;
+    return x2 * x2 * x;
+}
+
+/// Danny Chan (SIGGRAPH 2018, \"Material Advances in Call of Duty: WWII\")
+/// multiscattering GGX rough-diffuse BRDF.
+fn nvf_diffuse_brdf(
+    diffuse_color: vec3<f32>,
+    perceptual_roughness: f32,
+    roughness: f32,
+    F0_dielectric: vec3<f32>,
+    NdotV_in: f32,
+    NdotL_in: f32,
+    NdotH_in: f32,
+    LdotH_in: f32,
+) -> vec3<f32> {
+    let a2 = clamp(roughness * roughness, 1e-6, 1.0);
+    let g = saturate((1.0 / 18.0) * log2(max(2.0 / a2 - 1.0, 1.0)));
+    let ldoth = saturate(LdotH_in);
+    let ndotl = saturate(NdotL_in);
+    let ndotv = saturate(NdotV_in);
+    let ndoth = saturate(NdotH_in);
+
+    let f0 = ldoth + nvf_pow5(1.0 - ldoth);
+    let f1 = (1.0 - 0.75 * nvf_pow5(1.0 - ndotl)) * (1.0 - 0.75 * nvf_pow5(1.0 - ndotv));
+    let t = saturate(2.2 * g - 0.5);
+    let fd = mix(f0, f1, t);
+    let fb = ((34.5 * g - 59.0) * g + 24.5) * ldoth * exp2(-max(73.2 * g - 21.2, 8.9) * sqrt(ndoth));
+    let f0_scale = saturate((vec3(1.0) - F0_dielectric) * (1.0 / 0.96));
+    return diffuse_color * f0_scale * ((fd + fb) * (1.0 / PI));
+}
+
+fn Fd_Chan(
+    input: ptr<function, LightingInput>,
+    derived_input: ptr<function, DerivedLightingInput>,
+    diffuse_color: vec3<f32>,
+) -> vec3<f32> {
+    return nvf_diffuse_brdf(
+        diffuse_color,
+        (*input).layers[LAYER_BASE].perceptual_roughness,
+        (*input).layers[LAYER_BASE].roughness,
+        (*input).F0_dielectric,
+        (*input).layers[LAYER_BASE].NdotV,
+        (*derived_input).NdotL,
+        (*derived_input).NdotH,
+        (*derived_input).LdotH,
+    );
+}
+
+";
+
+const LAMBERT_FN: &str = "/// Plain Lambertian diffuse BRDF (albedo / pi) for comparison under NVF_DIFFUSE=lambert.
+fn nvf_diffuse_brdf(
+    diffuse_color: vec3<f32>,
+    perceptual_roughness: f32,
+    roughness: f32,
+    F0_dielectric: vec3<f32>,
+    NdotV_in: f32,
+    NdotL_in: f32,
+    NdotH_in: f32,
+    LdotH_in: f32,
+) -> vec3<f32> {
+    return diffuse_color * (1.0 / PI);
+}
+
+fn Fd_Lambert(
+    input: ptr<function, LightingInput>,
+    derived_input: ptr<function, DerivedLightingInput>,
+    diffuse_color: vec3<f32>,
+) -> vec3<f32> {
+    return nvf_diffuse_brdf(
+        diffuse_color,
+        (*input).layers[LAYER_BASE].perceptual_roughness,
+        (*input).layers[LAYER_BASE].roughness,
+        (*input).F0_dielectric,
+        (*input).layers[LAYER_BASE].NdotV,
+        (*derived_input).NdotL,
+        (*derived_input).NdotH,
+        (*derived_input).LdotH,
+    );
+}
+
 ";
 
 const ENV_BRDF_ANCHOR: &str = "fn EnvBRDFApprox(";
 const BURLEY_CALL: &str = "        diffuse = diffuse_color * Fd_Burley(input, &derived_input);";
 const OREN_NAYAR_CALL: &str = "        // NVForever (NVF_PHYSICAL_PBR): Energy-Conserving Oren-Nayar (EON) with reciprocal dielectric coupling.
         diffuse = Fd_OrenNayar(input, &derived_input, diffuse_color);";
+const CHAN_CALL: &str = "        // NVForever (NVF_PHYSICAL_PBR): Chan (SIGGRAPH 2018) multiscattering GGX diffuse.
+        diffuse = Fd_Chan(input, &derived_input, diffuse_color);";
+const LAMBERT_CALL: &str = "        // NVForever (NVF_PHYSICAL_PBR): Plain Lambertian diffuse (albedo / pi).
+        diffuse = Fd_Lambert(input, &derived_input, diffuse_color);";
 
-/// `pbr_lighting.wesl` with `Fd_OrenNayar` (EON + reciprocal dielectric coupling) added after
-/// `F_AB` and both `Fd_Burley` call sites (`point_light` and `directional_light`) swapped to it.
-pub(crate) fn oren_nayar_patched(source: &str) -> Option<String> {
+/// `pbr_lighting.wesl` with the selected physical diffuse BRDF (`Fd_OrenNayar`, `Fd_Chan`, or
+/// `Fd_Lambert` + `nvf_diffuse_brdf`) added after `F_AB` and both `Fd_Burley` call sites
+/// (`point_light` and `directional_light`) swapped to it.
+pub(crate) fn diffuse_patched(source: &str, diffuse: PhysicalDiffuse) -> Option<String> {
     if source.matches(ENV_BRDF_ANCHOR).count() != 1 || source.matches(BURLEY_CALL).count() != 2 {
         return None;
     }
+    let (fn_text, call_text) = match diffuse {
+        PhysicalDiffuse::OrenNayar => (OREN_NAYAR_FN, OREN_NAYAR_CALL),
+        PhysicalDiffuse::Chan => (CHAN_FN, CHAN_CALL),
+        PhysicalDiffuse::Lambert => (LAMBERT_FN, LAMBERT_CALL),
+    };
     let at = source.find(ENV_BRDF_ANCHOR)?;
-    let mut out = String::with_capacity(source.len() + OREN_NAYAR_FN.len() + 256);
+    let mut out = String::with_capacity(source.len() + fn_text.len() + 256);
     out.push_str(&source[..at]);
-    out.push_str(OREN_NAYAR_FN);
+    out.push_str(fn_text);
     out.push_str(&source[at..]);
-    Some(out.replace(BURLEY_CALL, OREN_NAYAR_CALL))
+    Some(out.replace(BURLEY_CALL, call_text))
 }
 
-/// Patches `bevy_pbr/render/pbr_lighting.wesl` for either physical PBR (`physical = true`)
-/// or display-value lighting (`physical = false`). Shared by `lights::tests` and
-/// `nvf-shader-tests`.
+/// Patches `bevy_pbr/render/pbr_lighting.wesl` for either physical PBR (`physical = true`,
+/// with the requested [`PhysicalDiffuse`]) or display-value lighting (`physical = false`).
 #[allow(dead_code)]
-pub(crate) fn lighting_patched(source: &str, physical: bool) -> Option<String> {
+pub(crate) fn lighting_patched_with_diffuse(source: &str, physical: bool, diffuse: PhysicalDiffuse) -> Option<String> {
     let source = unix_lines(source);
     if !source.contains(BEVY_ATTENUATION) {
         return None;
@@ -186,13 +311,20 @@ pub(crate) fn lighting_patched(source: &str, physical: bool) -> Option<String> {
             return None;
         }
         patched = patched.replace(ROUGHNESS_FLOOR_EDIT.0, ROUGHNESS_FLOOR_EDIT.1);
-        oren_nayar_patched(&patched)
+        diffuse_patched(&patched, diffuse)
     } else {
         if patched.matches(FRESNEL_EDIT.0).count() != 1 {
             return None;
         }
         Some(patched.replace(FRESNEL_EDIT.0, FRESNEL_EDIT.1))
     }
+}
+
+/// Patches `bevy_pbr/render/pbr_lighting.wesl` with the default physical diffuse (`OrenNayar`)
+/// when `physical = true`, or display-value lighting when `physical = false`.
+#[allow(dead_code)]
+pub(crate) fn lighting_patched(source: &str, physical: bool) -> Option<String> {
+    lighting_patched_with_diffuse(source, physical, PhysicalDiffuse::OrenNayar)
 }
 
 /// Diffuse and specular scales applied to shadow-casting spot lights (the player's

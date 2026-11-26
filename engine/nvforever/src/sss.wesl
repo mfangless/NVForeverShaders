@@ -15,6 +15,7 @@ import bevy_pbr::render::{
     pbr_lighting::{D_GGX, F_AB, V_SmithGGXCorrelated, fresnel, getDistanceAttenuation},
     shadows::{get_cascade_index, world_to_directional_light_local},
 };
+@if(NVF_PHYSICAL_PBR) import bevy_pbr::render::pbr_lighting::nvf_diffuse_brdf;
 import bevy_render::maths::PI;
 
 // NVF_SKIN_SPLIT: the diffuse light of the last nvf_skin_eval, the share the screen-space
@@ -254,6 +255,26 @@ fn nvf_skin_eval(
     let spec_oil = sebum.xyz * (s * PI);
     let skin_scatter = preint * shadow_rgb + back_scatter;
 
+    @if(NVF_PHYSICAL_PBR)
+    if physical {
+        let r_skin = clamp(perceptual_roughness, 0.045, 1.0);
+        let h_skin = nvf_sss_safe_normalize(L + V, N);
+        let skin_brdf_pi = nvf_diffuse_brdf(
+            diffuse_color,
+            r_skin,
+            r_skin * r_skin,
+            F0_dielectric,
+            max(dot(N, V), 0.0001),
+            max(dot(N, L), 0.0001),
+            saturate(dot(N, h_skin)),
+            saturate(dot(L, h_skin)),
+        ) * PI;
+        let t_oil = 1.0 - 0.06 * sebum.w;
+        let diffuse = (skin_brdf_pi * (preint * shadow_rgb) + diffuse_color * back_scatter) * t_oil * light_rad;
+        nvf_skin_last_diffuse = diffuse;
+        return diffuse + spec_oil * light_rad;
+    }
+    @if(!NVF_PHYSICAL_PBR)
     if physical {
         let t_base = nvf_sss_dielectric_T(F0_dielectric, saturate(perceptual_roughness), max(dot(N, V), 0.0001), max(dot(N, L), 0.0001));
         let t_oil = 1.0 - 0.06 * sebum.w;
@@ -520,19 +541,34 @@ fn nvf_hair_eval(T_in: vec3<f32>, N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, albe
     let t_raw = T_in - N * dot(T_in, N);
     let t_len2 = dot(t_raw, t_raw);
     let ndl = dot(N, L);
-    // Diffuse: wrapped (energy-kept) on the surface normal, a third Kajiya-Kay.
+    // Diffuse: wrapped (energy-kept) on the surface normal, a third Kajiya-Kay, modulated
+    // by the active NVF_DIFFUSE BRDF under Physical PBR.
     let wrapped = saturate((ndl + NVF_HAIR_WRAP) / ((1.0 + NVF_HAIR_WRAP) * (1.0 + NVF_HAIR_WRAP)));
     let luma = max(dot(albedo, vec3(0.2126, 0.7152, 0.0722)), 1e-4);
     let tint = pow(max(albedo / luma, vec3(1e-4)), vec3(1.0 - s));
+    let r = clamp(perceptual_roughness, 0.18, 1.0);
+    let h_hair = nvf_sss_safe_normalize(L + V, N);
+    @if(NVF_PHYSICAL_PBR)
+    let hair_diff_brdf = nvf_diffuse_brdf(
+        albedo,
+        r,
+        r * r,
+        vec3(NVF_HAIR_F0),
+        max(dot(N, V), 0.0001),
+        max(ndl, 0.0001),
+        saturate(dot(N, h_hair)),
+        saturate(dot(L, h_hair)),
+    );
+    @if(!NVF_PHYSICAL_PBR)
+    let hair_diff_brdf = albedo * (1.0 / PI);
     if t_len2 < 1e-8 {
-        return albedo * (1.0 / PI) * wrapped * tint * s;
+        return hair_diff_brdf * wrapped * tint * s;
     }
     let T = t_raw * inverseSqrt(t_len2);
     let kajiya = 1.0 - abs(dot(T, L));
     // Kajiya-Kay under a half-Lambert on the shell (1 facing the light, 0 facing away).
-    let diffuse = albedo * (1.0 / PI) * mix(wrapped, kajiya * 0.5 * (ndl + 1.0), 0.33) * tint * s;
+    let diffuse = hair_diff_brdf * mix(wrapped, kajiya * 0.5 * (ndl + 1.0), 0.33) * tint * s;
 
-    let r = clamp(perceptual_roughness, 0.18, 1.0);
     let B = vec2(r * r, 2.0 * r * r);
     let sin_l = clamp(dot(T, L), -1.0, 1.0);
     let sin_v = clamp(dot(T, V), -1.0, 1.0);

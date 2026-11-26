@@ -4290,15 +4290,21 @@ engineering choice tuned by eye on this machine (`[design]`) unless the row says
 `NVF_PHYSICAL_PBR=1` / `0`; read once at the start, so a change applies at the next start).
 The display-value lighting sum (world.md §8) is replaced by linear lighting:
 
-- *Diffuse*: the energy-preserving Oren-Nayar model (EON) [documented: Portsmouth, Kutz
-  and Hill, "EON: A practical energy-preserving rough diffuse BRDF", JCGT 2025; the
-  OpenPBR surface specification's diffuse]. *Specular*: Cook-Torrance with the GGX
+- *Diffuse* (`diffuse-model`, Graphics > Lighting and Effects; `NVF_DIFFUSE=oren-nayar` /
+  `chan` / `lambert` or `1` / `0`; live under Physical PBR across all lit materials,
+  including skin and hair under `subsurface-scattering`): three selectable direct-light
+  diffuse BRDFs: `Oren-Nayar` (default), the energy-preserving Oren-Nayar model (EON)
+  [documented: Portsmouth, Kutz and Hill, "EON: A practical energy-preserving rough diffuse
+  BRDF", JCGT 2025; the OpenPBR surface specification's diffuse] with reciprocal dielectric
+  coupling; `Chan`, the GGX multiscattering rough-diffuse model [documented: Chan 2018,
+  "Material Advances in Call of Duty: WWII", SIGGRAPH 2018]; and `Lambert` (`albedo / π`)
+  for comparison. *Specular*: Cook-Torrance with the GGX
   distribution [documented: Walter et al. 2007, "Microfacet Models for Refraction through
   Rough Surfaces"] and Bevy's Schlick Fresnel; the perceptual roughness floor is 0.045,
   Filament's desktop figure, in place of Bevy's mobile 0.089 [documented: Filament's
   material documentation]. In the display-value mode the highlight keeps F = F0 in world
   views (#2266, `lights.rs` `FRESNEL_EDIT`); physical PBR takes Bevy's Fresnel on
-  purpose. Code: `lights/display_shader.rs` (`lighting_patched`, `oren_nayar_patched`).
+  purpose. Code: `lights/display_shader.rs` (`lighting_patched_with_diffuse`, `diffuse_patched`).
 - *Lamps*: inverse-square falloff with a finite bulb core and a smooth window at the
   light's radius, `w² · 0.22 / (u + 0.09)` with `u = (d / R)²` and
   `w = 1 − u²` [design: the inverse-square law with a core and window after Karis 2013,

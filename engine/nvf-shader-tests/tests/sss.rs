@@ -276,3 +276,59 @@ fn foliage_canopy_and_shadow_prepass_shaders_compile() {
             .any(|e| e.stage == naga::ShaderStage::Fragment));
     }
 }
+
+#[test]
+fn sss_materials_compile_with_all_physical_diffuse_models() {
+    use support::production_display_shader::PhysicalDiffuse;
+    for (diffuse, expected_fn) in [
+        (PhysicalDiffuse::OrenNayar, "Fd_OrenNayar"),
+        (PhysicalDiffuse::Chan, "Fd_Chan"),
+        (PhysicalDiffuse::Lambert, "Fd_Lambert"),
+    ] {
+        let mut compiler = Compiler::with_sss_diffuse(true, diffuse);
+        for (shader, defs) in [
+            (
+                "nvf_assets/nif_material.wesl",
+                &["NVF_PHYSICAL_PBR", "NVF_SKIN_SSS", "VERTEX_UVS_B", "ENVIRONMENT_MAP"][..],
+            ),
+            (
+                "nvf_assets/nif_material.wesl",
+                &["NVF_PHYSICAL_PBR", "NVF_SKIN_SSS", "NVF_SKIN_SPLIT", "VERTEX_UVS_B", "ENVIRONMENT_MAP"][..],
+            ),
+            (
+                "nvf_assets/nif_material.wesl",
+                &["NVF_PHYSICAL_PBR", "NVF_HAIR", "VERTEX_UVS", "VERTEX_UVS_A", "STANDARD_MATERIAL_BASE_COLOR_TEXTURE", "ENVIRONMENT_MAP"][..],
+            ),
+            (
+                "nvf_assets/nif_material.wesl",
+                &["NVF_PHYSICAL_PBR", "NVF_EYE", "STANDARD_MATERIAL_CLEARCOAT", "ENVIRONMENT_MAP"][..],
+            ),
+            (
+                "nvforever/grass.wesl",
+                &["NVF_PHYSICAL_PBR", "NVF_CANOPY", "NVF_FOLIAGE_SSS", "NVF_AMBIENT_OCCLUSION"][..],
+            ),
+            (
+                "nvforever/tree.wesl",
+                &["NVF_PHYSICAL_PBR", "TREE_LEAVES", "NVF_CANOPY", "NVF_FOLIAGE_SSS", "NVF_CROWN_SHADOW"][..],
+            ),
+        ] {
+            let compiled = compiler.compile(shader, defs);
+            assert!(
+                has_fn(&compiled, expected_fn),
+                "{diffuse:?} {shader} {defs:?}: {expected_fn} present"
+            );
+            assert!(
+                has_fn(&compiled, "nvf_diffuse_brdf"),
+                "{diffuse:?} {shader} {defs:?}: nvf_diffuse_brdf present"
+            );
+            assert!(
+                compiled
+                    .module
+                    .entry_points
+                    .iter()
+                    .any(|e| e.stage == naga::ShaderStage::Fragment),
+                "{diffuse:?} {shader} {defs:?}: fragment entry point"
+            );
+        }
+    }
+}

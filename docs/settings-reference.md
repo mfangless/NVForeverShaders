@@ -1280,16 +1280,31 @@ below cover them all.
 
 ### `physical-pbr`: Physical PBR lighting
 
-- On the page: On: linear Oren-Nayar diffuse, Cook-Torrance specular, sky IBL and
+- On the page: On: linear rough diffuse, Cook-Torrance specular, sky IBL and
   Beer-Lambert fog instead of the original's display lighting. Takes effect at the next
   start.
-- In full: Replaces the display-value lighting bypass with linear OpenPBR Energy-Conserving
-  Oren-Nayar diffuse, full Cook-Torrance GGX specular with reciprocal dielectric coupling,
-  procedural sky/ground/interior cubemap IBL, windowed inverse-square lamp falloff, linear
-  Beer-Lambert fog, and Tony McMapface tonemapping. Off in both presets; can also be
-  overridden per run via `NVF_PHYSICAL_PBR=1` / `0`. Read once at the start, so a change
-  applies at the next start. Not in the original.
+- In full: Replaces the display-value lighting bypass with linear rough diffuse (selectable
+  between OpenPBR Energy-Conserving Oren-Nayar, SIGGRAPH 2018 Chan GGX multiscatter, and
+  Lambert via `diffuse-model` / `NVF_DIFFUSE`), full Cook-Torrance GGX specular, procedural
+  sky/ground/interior cubemap IBL, windowed inverse-square lamp falloff, linear Beer-Lambert
+  fog, and Tony McMapface tonemapping. Off in both presets; can also be overridden per run
+  via `NVF_PHYSICAL_PBR=1` / `0`. Read once at the start, so a change applies at the next
+  start. Not in the original.
 - Command-line switches: `--graphics-only`
+- Registered in `engine/nvforever/src/settings.rs`
+
+### `diffuse-model`: Diffuse model
+
+- On the page: How surfaces scatter direct light under Physical PBR: Oren-Nayar (EON), Chan
+  (GGX multiscatter) or flat Lambert. Applies live without a restart.
+- In full: Selects the direct-light diffuse BRDF applied across all lit materials (NIFs,
+  terrain, grass, foliage, skin, hair, eyes, decals, and water) when Physical PBR lighting
+  is enabled: `Oren-Nayar` (OpenPBR Energy-Conserving Oren-Nayar with reciprocal dielectric
+  coupling, default), `Chan` (Danny Chan's SIGGRAPH 2018 *Call of Duty: WWII* GGX
+  multiscattering diffuse), or `Lambert` (plain `albedo / π` for comparison). Takes effect
+  live in play without restarting; can also be seeded at startup via
+  `NVF_DIFFUSE=oren-nayar|chan|lambert` (`1` selects `Chan`, `0` selects `Oren-Nayar`).
+  Greyed while Physical PBR lighting is off. Not in the original.
 - Registered in `engine/nvforever/src/settings.rs`
 
 ### `subsurface-scattering`: Subsurface scattering

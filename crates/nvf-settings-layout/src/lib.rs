@@ -264,7 +264,7 @@ pub const SECTIONS: &[Section] = &[
     // Shadow resolution sizes the flashlight's maps too, so it needs no Sun shadows (no NEEDS
     // line) (#2843).
     section("Graphics", Some("Shadows"), &["sun-shadows", "shadow-filter", "shadow-resolution", "shadow-distance", "fine-shadows", "cloud-shadows", "terrain-shadows", "grass-shadows", "light-shadows"]),
-    section("Graphics", Some("Lighting and Effects"), &["ambient-occlusion", "volumetric-clouds", "light-shafts", "heat-haze", "desert-haze", "volumetric-light", "volumetric-light-strength", "aerial-perspective", "night-sky-detail", "bloom", "grade", "glow", "eye-adaptation", "neon-glow", "physical-pbr", "subsurface-scattering", "ssgi"]),
+    section("Graphics", Some("Lighting and Effects"), &["ambient-occlusion", "volumetric-clouds", "light-shafts", "heat-haze", "desert-haze", "volumetric-light", "volumetric-light-strength", "aerial-perspective", "night-sky-detail", "bloom", "grade", "glow", "eye-adaptation", "neon-glow", "physical-pbr", "diffuse-model", "subsurface-scattering", "ssgi"]),
     section("Graphics", Some("Water"), &["water-reflections", "water-mirror", "water-effects"]),
     section("Graphics", Some("Detail and Distance"), &["distant-lod", "full-detail", "distant-objects", "grass", "anisotropic", "authored-materials", "authored-reflections", "terrain-height-blend", "terrain-anti-tiling", "terrain-parallax", "mesh-terrain-blend", "occlusion-culling", "smooth-terrain", "object-distance", "actor-distance", "item-distance", "grass-distance", "tree-distance", "distant-lights"]),
     section("Graphics", Some("World and Animation"), &["head-tracking", "foot-ik", "sky-clock"]),
@@ -1031,6 +1031,7 @@ pub const NEEDS: &[(&str, &str, &str)] = &[
     ("grass-shadows", "sun-shadows", "Needs Sun Shadows."),
     ("eye-adaptation", "glow", "Needs Light Glow (HDR)."),
     ("neon-glow", "glow", "Needs Light Glow (HDR)."),
+    ("diffuse-model", "physical-pbr", "Needs Physical PBR Lighting."),
     ("volumetric-light-strength", "volumetric-light", "Needs Volumetric Light."),
     ("grass-distance", "grass", "Needs Grass."),
     // #3322: the terrain parallax draws the authored height maps.

@@ -783,18 +783,100 @@ pub fn set_physical_pbr(on: bool) {
 }
 
 /// The physical PBR lighting switch (off by default; `NVF_PHYSICAL_PBR=1`, read once at the
-/// start): swaps `Fd_Burley` for trig-free qualitative Oren-Nayar diffuse (with Fresnel
-/// energy coupling), restores full Cook-Torrance GGX Schlick Fresnel in world views,
+/// start): swaps `Fd_Burley` for the active physical diffuse model ([`DiffuseModel`],
+/// `NVF_DIFFUSE`), restores full Cook-Torrance GGX Schlick Fresnel in world views,
 /// replaces the display-value diffuse bypass with linear diffuse + ambient lighting, and
 /// keeps Tony McMapface tonemapping active.
 pub fn physical_pbr() -> bool {
     *PHYSICAL_PBR.get_or_init(|| {
         let on = std::env::var(PHYSICAL_PBR_ENV).is_ok_and(|v| v.trim() == "1");
         if on {
-            info!("authored materials: physical PBR switch ({PHYSICAL_PBR_ENV}=1): linear Oren-Nayar diffuse + Cook-Torrance GGX specular with full Schlick Fresnel");
+            info!(
+                "authored materials: physical PBR switch ({PHYSICAL_PBR_ENV}=1): linear {} diffuse + Cook-Torrance GGX specular with full Schlick Fresnel",
+                diffuse_model().name()
+            );
         }
         on
     })
+}
+
+/// The environment variable of the physical diffuse model switch ([`diffuse_model`]).
+pub const DIFFUSE_ENV: &str = "NVF_DIFFUSE";
+
+/// Direct-light diffuse BRDF used across all lit materials when [`physical_pbr`] is on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum DiffuseModel {
+    /// OpenPBR Energy-Conserving Oren-Nayar (Portsmouth, Kutz & Hill, JCGT 2025) with
+    /// reciprocal dielectric specular-diffuse coupling.
+    #[default]
+    OrenNayar = 0,
+    /// Danny Chan (SIGGRAPH 2018, "Material Advances in Call of Duty: WWII")
+    /// multiscattering GGX rough-diffuse BRDF.
+    Chan = 1,
+    /// Plain Lambertian diffuse (`albedo / pi`) for comparison.
+    Lambert = 2,
+}
+
+pub const DIFFUSE_CHOICES: [&str; 3] = ["Oren-Nayar", "Chan", "Lambert"];
+
+impl DiffuseModel {
+    pub const ALL: [Self; 3] = [Self::OrenNayar, Self::Chan, Self::Lambert];
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::OrenNayar => "Oren-Nayar",
+            Self::Chan => "Chan",
+            Self::Lambert => "Lambert",
+        }
+    }
+
+    /// Parses a setting name, INI value, or `NVF_DIFFUSE` value (`1`/`on` selects `Chan`,
+    /// `0`/`off` selects `Oren-Nayar`).
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "oren-nayar" | "oren_nayar" | "orennayar" | "eon" | "0" | "false" | "off" | "no" => Some(Self::OrenNayar),
+            "chan" | "1" | "true" | "on" | "yes" => Some(Self::Chan),
+            "lambert" | "lambertian" => Some(Self::Lambert),
+            _ => None,
+        }
+    }
+
+    pub fn from_env() -> Option<Self> {
+        std::env::var(DIFFUSE_ENV).ok().and_then(|v| Self::parse(&v))
+    }
+
+    const fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Chan,
+            2 => Self::Lambert,
+            _ => Self::OrenNayar,
+        }
+    }
+}
+
+const DIFFUSE_UNSET: u8 = 0xFF;
+static DIFFUSE_MODEL: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(DIFFUSE_UNSET);
+
+/// Set the active physical diffuse model (callable at startup and live from settings).
+pub fn set_diffuse_model(model: DiffuseModel) {
+    DIFFUSE_MODEL.store(model as u8, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Active physical diffuse model (`NVF_DIFFUSE`, or the settings row's live choice).
+pub fn diffuse_model() -> DiffuseModel {
+    let cur = DIFFUSE_MODEL.load(std::sync::atomic::Ordering::Relaxed);
+    if cur != DIFFUSE_UNSET {
+        return DiffuseModel::from_u8(cur);
+    }
+    let init = DiffuseModel::from_env().unwrap_or_default();
+    let _ = DIFFUSE_MODEL.compare_exchange(
+        DIFFUSE_UNSET,
+        init as u8,
+        std::sync::atomic::Ordering::Relaxed,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    DiffuseModel::from_u8(DIFFUSE_MODEL.load(std::sync::atomic::Ordering::Relaxed))
 }
 
 /// The environment variable of the subsurface scattering switch ([`sss_enabled`]).

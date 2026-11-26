@@ -1,10 +1,11 @@
-//! Physical PBR lighting (`NVF_PHYSICAL_PBR=1`): `pbr_lighting.wesl` with OpenPBR
-//! `Fd_OrenNayar` EON diffuse, reciprocal dielectric coupling, desktop 0.045 roughness
-//! floor, physical inverse-square attenuation, `pbr_functions.wesl` with procedural
-//! `ENVIRONMENT_MAP` IBL and Frostbite specular AO, and `fog.wesl` with linear
-//! Beer-Lambert extinction/inscattering, validated by Naga across all world shaders.
+//! Physical PBR lighting (`NVF_PHYSICAL_PBR=1`): `pbr_lighting.wesl` with selectable
+//! `Fd_OrenNayar` (EON), `Fd_Chan` (SIGGRAPH 2018), or `Fd_Lambert` diffuse (`NVF_DIFFUSE`),
+//! desktop 0.045 roughness floor, physical inverse-square attenuation, `pbr_functions.wesl`
+//! with procedural `ENVIRONMENT_MAP` IBL and Frostbite specular AO, and `fog.wesl` with
+//! linear Beer-Lambert extinction/inscattering, validated by Naga across all world shaders.
 
 mod support;
+use support::production_display_shader::PhysicalDiffuse;
 use support::{Compiled, Compiler};
 
 /// Whether the composed module declares group 0, binding `binding`.
@@ -26,69 +27,80 @@ fn has_fn(compiled: &Compiled, needle: &str) -> bool {
 
 #[test]
 fn every_world_material_compiles_with_physical_pbr() {
-    let mut compiler = Compiler::with_physical_pbr();
-    for (shader, extra) in [
-        ("nvf_assets/nif_material.wesl", &["NVF_PHYSICAL_PBR"][..]),
-        ("nvf_assets/nif_material.wesl", &["NVF_PHYSICAL_PBR", "MAY_DISCARD"][..]),
-        ("nvf_assets/nif_material.wesl", &["NVF_PHYSICAL_PBR", "FIRST_PERSON_DEPTH"][..]),
-        (
-            "nvf_assets/nif_material.wesl",
-            &["NVF_PHYSICAL_PBR", "FIRST_PERSON_DEPTH", "SHADE_LIGHT"][..],
-        ),
-        ("nvforever/terrain.wesl", &["NVF_PHYSICAL_PBR"][..]),
-        ("nvforever/grass.wesl", &[][..]),
-        ("nvforever/tree.wesl", &["TREE_LEAVES"][..]),
-        ("nvforever/tree.wesl", &["TREE_LEAVES", "NVF_CROWN_SHADOW"][..]),
-        ("bevy_pbr/render/pbr.wesl", &[][..]),
+    for (diffuse, expected_fn) in [
+        (PhysicalDiffuse::OrenNayar, "Fd_OrenNayar"),
+        (PhysicalDiffuse::Chan, "Fd_Chan"),
+        (PhysicalDiffuse::Lambert, "Fd_Lambert"),
     ] {
-        for env_map in [false, true] {
-            for on in [false, true] {
-                let mut defs = extra.to_vec();
-                defs.push("DISTANCE_FOG");
-                if env_map {
-                    defs.push("ENVIRONMENT_MAP");
+        let mut compiler = Compiler::with_physical_pbr_diffuse(diffuse);
+        for (shader, extra) in [
+            ("nvf_assets/nif_material.wesl", &["NVF_PHYSICAL_PBR"][..]),
+            ("nvf_assets/nif_material.wesl", &["NVF_PHYSICAL_PBR", "MAY_DISCARD"][..]),
+            ("nvf_assets/nif_material.wesl", &["NVF_PHYSICAL_PBR", "FIRST_PERSON_DEPTH"][..]),
+            (
+                "nvf_assets/nif_material.wesl",
+                &["NVF_PHYSICAL_PBR", "FIRST_PERSON_DEPTH", "SHADE_LIGHT"][..],
+            ),
+            ("nvforever/terrain.wesl", &["NVF_PHYSICAL_PBR"][..]),
+            ("nvforever/grass.wesl", &[][..]),
+            ("nvforever/tree.wesl", &["TREE_LEAVES"][..]),
+            ("nvforever/tree.wesl", &["TREE_LEAVES", "NVF_CROWN_SHADOW"][..]),
+            ("bevy_pbr/render/pbr.wesl", &[][..]),
+        ] {
+            for env_map in [false, true] {
+                for on in [false, true] {
+                    let mut defs = extra.to_vec();
+                    defs.push("DISTANCE_FOG");
+                    if env_map {
+                        defs.push("ENVIRONMENT_MAP");
+                    }
+                    if on {
+                        defs.push("NVF_AMBIENT_OCCLUSION");
+                    }
+                    let compiled = compiler.compile(shader, &defs);
+                    assert_eq!(
+                        binds(&compiled, 43),
+                        on,
+                        "{diffuse:?} {shader} {defs:?}: the uniform at binding 43"
+                    );
+                    let first_person = defs.contains(&"FIRST_PERSON_DEPTH");
+                    assert_eq!(
+                        binds(&compiled, 44),
+                        on && !first_person,
+                        "{diffuse:?} {shader} {defs:?}: the texture at binding 44"
+                    );
+                    assert!(
+                        has_fn(&compiled, expected_fn),
+                        "{diffuse:?} {shader} {defs:?}: {expected_fn} present in Naga module"
+                    );
+                    assert!(
+                        has_fn(&compiled, "nvf_diffuse_brdf"),
+                        "{diffuse:?} {shader} {defs:?}: nvf_diffuse_brdf present in Naga module"
+                    );
+                    assert_eq!(
+                        has_fn(&compiled, "nvf_dielectric_E"),
+                        diffuse == PhysicalDiffuse::OrenNayar,
+                        "{diffuse:?} {shader} {defs:?}: nvf_dielectric_E iff OrenNayar"
+                    );
+                    assert_eq!(
+                        has_fn(&compiled, "nvf_specular_ao"),
+                        env_map && on,
+                        "{diffuse:?} {shader} {defs:?}: nvf_specular_ao present iff ENVIRONMENT_MAP && NVF_AMBIENT_OCCLUSION"
+                    );
+                    assert_eq!(
+                        has_fn(&compiled, "nvf_physical_occlusion"),
+                        on && !first_person,
+                        "{diffuse:?} {shader} {defs:?}: nvf_physical_occlusion present iff NVF_AMBIENT_OCCLUSION && !FIRST_PERSON_DEPTH"
+                    );
+                    assert!(
+                        compiled
+                            .module
+                            .entry_points
+                            .iter()
+                            .any(|e| e.stage == naga::ShaderStage::Fragment),
+                        "{diffuse:?} {shader} {defs:?}: a fragment entry point"
+                    );
                 }
-                if on {
-                    defs.push("NVF_AMBIENT_OCCLUSION");
-                }
-                let compiled = compiler.compile(shader, &defs);
-                assert_eq!(
-                    binds(&compiled, 43),
-                    on,
-                    "{shader} {defs:?}: the uniform at binding 43"
-                );
-                let first_person = defs.contains(&"FIRST_PERSON_DEPTH");
-                assert_eq!(
-                    binds(&compiled, 44),
-                    on && !first_person,
-                    "{shader} {defs:?}: the texture at binding 44"
-                );
-                assert!(
-                    has_fn(&compiled, "Fd_OrenNayar"),
-                    "{shader} {defs:?}: Fd_OrenNayar present in Naga module"
-                );
-                assert!(
-                    has_fn(&compiled, "nvf_dielectric_E"),
-                    "{shader} {defs:?}: nvf_dielectric_E present in Naga module"
-                );
-                assert_eq!(
-                    has_fn(&compiled, "nvf_specular_ao"),
-                    env_map && on,
-                    "{shader} {defs:?}: nvf_specular_ao present iff ENVIRONMENT_MAP && NVF_AMBIENT_OCCLUSION"
-                );
-                assert_eq!(
-                    has_fn(&compiled, "nvf_physical_occlusion"),
-                    on && !first_person,
-                    "{shader} {defs:?}: nvf_physical_occlusion present iff NVF_AMBIENT_OCCLUSION && !FIRST_PERSON_DEPTH"
-                );
-                assert!(
-                    compiled
-                        .module
-                        .entry_points
-                        .iter()
-                        .any(|e| e.stage == naga::ShaderStage::Fragment),
-                    "{shader} {defs:?}: a fragment entry point"
-                );
             }
         }
     }

@@ -454,6 +454,7 @@ mod shared_table_tests {
         ("eye-adaptation", "Graphics"),
         ("neon-glow", "Graphics"),
         ("physical-pbr", "Graphics"),
+        ("diffuse-model", "Graphics"),
         ("subsurface-scattering", "Graphics"),
         ("ssgi", "Graphics"),
         ("sharpen", "Graphics"),
@@ -747,6 +748,7 @@ mod shared_table_tests {
         assert_eq!(at("terrain-anti-tiling"), "Graphics > Detail and Distance", "beside terrain height blending (#2551)");
         assert_eq!(at("authored-materials"), "Graphics > Detail and Distance", "beside anisotropic filtering, the other texture row (#2981)");
         assert_eq!(at("physical-pbr"), "Graphics > Lighting and Effects");
+        assert_eq!(at("diffuse-model"), "Graphics > Lighting and Effects");
         assert_eq!(at("subsurface-scattering"), "Graphics > Lighting and Effects");
         assert_eq!(at("ssgi"), "Graphics > Lighting and Effects");
         assert_eq!(at("authored-reflections"), "Graphics > Detail and Distance", "right after Authored materials (#2981 reflections)");

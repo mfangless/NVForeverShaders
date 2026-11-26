@@ -333,6 +333,8 @@ pub fn list_choices() -> HashMap<&'static str, &'static [&'static str]> {
         ("ambient-occlusion", &["Off", "Performance", "Quality"][..]),
         // volumetric_clouds.rs `CLOUD_CHOICES` (2026-11-23); the engine also reads its older 1/0.
         ("volumetric-clouds", &["Off", "Performance", "Normal", "High"][..]),
+        // authored.rs `DIFFUSE_CHOICES` (under Physical PBR).
+        ("diffuse-model", &["Oren-Nayar", "Chan", "Lambert"][..]),
     ])
 }
 
@@ -351,6 +353,14 @@ pub fn list_value(key: &str, value: &str) -> String {
             return list_choices()["difficulty"][i].to_string();
         }
         return v.to_string();
+    }
+    if key == "diffuse-model" {
+        return match v.to_ascii_lowercase().as_str() {
+            "oren-nayar" | "oren_nayar" | "orennayar" | "eon" | "0" | "false" | "off" | "no" => "Oren-Nayar".to_string(),
+            "chan" | "1" | "true" | "on" | "yes" => "Chan".to_string(),
+            "lambert" | "lambertian" => "Lambert".to_string(),
+            _ => v.to_string(),
+        };
     }
     let (on, off) = match key {
         "smooth-terrain" => ("4x4", "off"),
@@ -555,6 +565,10 @@ mod tests {
         let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../engine/nvforever/src/volumetric_clouds.rs")).unwrap();
         let listed = list_choices()["volumetric-clouds"].iter().map(|n| format!("\"{n}\"")).collect::<Vec<_>>().join(", ");
         assert!(src.contains(&format!("pub const CLOUD_CHOICES: [&str; 4] = [{listed}];")), "volumetric-clouds: the engine's CLOUD_CHOICES are no longer {listed}");
+        // The Diffuse model row's (authored.rs `DIFFUSE_CHOICES`).
+        let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../engine/nvf-assets/src/authored.rs")).unwrap();
+        let listed = list_choices()["diffuse-model"].iter().map(|n| format!("\"{n}\"")).collect::<Vec<_>>().join(", ");
+        assert!(src.contains(&format!("pub const DIFFUSE_CHOICES: [&str; 3] = [{listed}];")), "diffuse-model: the engine's DIFFUSE_CHOICES are no longer {listed}");
     }
 
     /// The Smooth terrain row's older on/off reads as its choices (4x4 and off), the Ambient

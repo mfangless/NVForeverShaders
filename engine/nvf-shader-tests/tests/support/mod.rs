@@ -41,6 +41,8 @@ pub struct Compiler {
     reflection_gate: bool,
     /// `pbr_lighting` and `pbr_functions` take the physical PBR patches (`NVF_PHYSICAL_PBR=1`).
     physical_pbr: bool,
+    /// Which direct-light diffuse BRDF `pbr_lighting` installs when `physical_pbr` is true.
+    diffuse: production_display_shader::PhysicalDiffuse,
     /// `pbr_functions` also takes the subsurface scattering hook (`NVF_SSS=1`).
     sss: bool,
 }
@@ -49,30 +51,67 @@ impl Compiler {
     /// `remove_invariance` restores the unannotated producer in memory. This runs
     /// through WESL and Naga too; it is not a source-text assertion.
     pub fn new(remove_invariance: &[&str]) -> Self {
-        Self::build(remove_invariance, false, false, false, false)
+        Self::build(
+            remove_invariance,
+            false,
+            false,
+            false,
+            production_display_shader::PhysicalDiffuse::OrenNayar,
+            false,
+        )
     }
 
     /// The production sources with the ambient occlusion's hook in `pbr_functions` as well,
     /// and nvf_assets' shaders (the NIF material) registered.
     pub fn with_ambient_occlusion_hook() -> Self {
-        Self::build(&[], true, false, false, false)
+        Self::build(
+            &[],
+            true,
+            false,
+            false,
+            production_display_shader::PhysicalDiffuse::OrenNayar,
+            false,
+        )
     }
 
     /// As [`Self::with_ambient_occlusion_hook`], with the reflection gate after the hook.
     pub fn with_reflection_gate() -> Self {
-        Self::build(&[], true, true, false, false)
+        Self::build(
+            &[],
+            true,
+            true,
+            false,
+            production_display_shader::PhysicalDiffuse::OrenNayar,
+            false,
+        )
     }
 
     /// The production sources with the `NVF_PHYSICAL_PBR=1` patches (`Fd_OrenNayar`,
     /// full Cook-Torrance Fresnel, linear diffuse/ambient, and physical ambient occlusion hook).
     pub fn with_physical_pbr() -> Self {
-        Self::build(&[], true, false, true, false)
+        Self::with_physical_pbr_diffuse(production_display_shader::PhysicalDiffuse::OrenNayar)
+    }
+
+    /// As [`Self::with_physical_pbr`], with the given [`production_display_shader::PhysicalDiffuse`].
+    pub fn with_physical_pbr_diffuse(diffuse: production_display_shader::PhysicalDiffuse) -> Self {
+        Self::build(&[], true, false, true, diffuse, false)
     }
 
     /// The production sources with `NVF_SSS=1` (`sss.rs` hook) layered onto either the
     /// display-value or physical PBR pipeline.
     pub fn with_sss(physical_pbr: bool) -> Self {
-        Self::build(&[], true, false, physical_pbr, true)
+        Self::with_sss_diffuse(
+            physical_pbr,
+            production_display_shader::PhysicalDiffuse::OrenNayar,
+        )
+    }
+
+    /// As [`Self::with_sss`], with the given [`production_display_shader::PhysicalDiffuse`].
+    pub fn with_sss_diffuse(
+        physical_pbr: bool,
+        diffuse: production_display_shader::PhysicalDiffuse,
+    ) -> Self {
+        Self::build(&[], true, false, physical_pbr, diffuse, true)
     }
 
     fn build(
@@ -80,6 +119,7 @@ impl Compiler {
         ambient_occlusion_hook: bool,
         reflection_gate: bool,
         physical_pbr: bool,
+        diffuse: production_display_shader::PhysicalDiffuse,
         sss: bool,
     ) -> Self {
         let mut compiler = Self {
@@ -102,6 +142,7 @@ impl Compiler {
             ambient_occlusion_hook,
             reflection_gate,
             physical_pbr,
+            diffuse,
             sss,
         };
         let engine = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
@@ -148,8 +189,12 @@ impl Compiler {
                 let name = format!("{package}/{relative}");
                 let mut source = fs::read_to_string(&path).expect("production WESL source");
                 if self.physical_pbr && name == "bevy_pbr/render/pbr_lighting.wesl" {
-                    source = production_display_shader::lighting_patched(&source, true)
-                        .expect("production physical lighting patch anchors match the selected shader");
+                    source = production_display_shader::lighting_patched_with_diffuse(
+                        &source,
+                        true,
+                        self.diffuse,
+                    )
+                    .expect("production physical lighting patch anchors match the selected shader");
                 }
                 if self.physical_pbr && name == "bevy_pbr/render/fog.wesl" {
                     source = production_fog_shader::fog_patched(&source, true)
