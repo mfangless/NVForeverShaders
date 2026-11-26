@@ -442,7 +442,9 @@ pub fn ambient_occlusion_opt_in(descriptor: &mut RenderPipelineDescriptor, mesh_
 /// in the picture's alpha, so only where nothing else reads that alpha in the draw: an
 /// opaque skin shape (no blending, no alpha to coverage) of a perspective view with a depth
 /// prepass, one sample and tone mapping after the main pass (the views that pass runs on;
-/// a multisampled view's samples cannot be read back, sss/screen.rs), not the first-person arms (their
+/// a multisampled view's samples cannot be read back, sss/screen.rs) and the skin's colour
+/// buffer bound (bevy_pbr `NvfSkinAlbedoBindings`, binding 47, which the split's fragments
+/// write; sss.wesl `nvf_skin_post_scatter`), not the first-person arms (their
 /// `SHADE_LIGHT` takes the light apart) nor an eye, and not under an input view
 /// (`NVF_PBR_VIEW`), whose colour is no light.
 fn skin_split_applies(enabled: bool, descriptor: &RenderPipelineDescriptor, mesh_key: MeshPipelineKey, key: &NifSurfaceKey, no_view_defs: bool) -> bool {
@@ -460,6 +462,7 @@ fn skin_split_applies(enabled: bool, descriptor: &RenderPipelineDescriptor, mesh
         && !descriptor.multisample.alpha_to_coverage_enabled
         && descriptor.multisample.count <= 1
         && mesh_key.contains(MeshPipelineKey::DEPTH_PREPASS)
+        && mesh_key.contains(MeshPipelineKey::NVF_SKIN_ALBEDO)
         && !mesh_key.contains(MeshPipelineKey::TONEMAP_IN_SHADER)
         && (mesh_key & MeshPipelineKey::VIEW_PROJECTION_RESERVED_BITS) == MeshPipelineKey::VIEW_PROJECTION_PERSPECTIVE
 }
@@ -1649,7 +1652,7 @@ mod tests {
     fn only_opaque_single_sampled_world_skin_takes_the_skin_split() {
         use bevy::render::render_resource::BlendState;
         let skin = NifSurfaceKey { decal: false, refract: false, hard_edges: false, shade_light: false, facegen: true, depth_write: false, first_person: false, add_linear: false, pipboy_screen: false, anti_tiling: false, terrain_layer: false, skin: true, foliage: false, eye: false, hair: false, outfit: false, soft: false, hdr: false };
-        let view = MeshPipelineKey::DEPTH_PREPASS | MeshPipelineKey::VIEW_PROJECTION_PERSPECTIVE;
+        let view = MeshPipelineKey::DEPTH_PREPASS | MeshPipelineKey::NVF_SKIN_ALBEDO | MeshPipelineKey::VIEW_PROJECTION_PERSPECTIVE;
         let main = main_pipeline(1, None);
         assert!(skin_split_applies(true, &main, view, &skin, true), "a face in the world view");
         assert!(!skin_split_applies(false, &main, view, &skin, true), "the switch off");
@@ -1659,9 +1662,10 @@ mod tests {
         coverage.multisample.alpha_to_coverage_enabled = true;
         assert!(!skin_split_applies(true, &coverage, view, &skin, true), "alpha to coverage");
         assert!(!skin_split_applies(true, &prepass_pipeline(1), view, &skin, true), "a prepass");
-        assert!(!skin_split_applies(true, &main, MeshPipelineKey::VIEW_PROJECTION_PERSPECTIVE, &skin, true), "no depth prepass");
+        assert!(!skin_split_applies(true, &main, MeshPipelineKey::VIEW_PROJECTION_PERSPECTIVE | MeshPipelineKey::NVF_SKIN_ALBEDO, &skin, true), "no depth prepass");
+        assert!(!skin_split_applies(true, &main, view - MeshPipelineKey::NVF_SKIN_ALBEDO, &skin, true), "no skin colour buffer");
         assert!(!skin_split_applies(true, &main, view | MeshPipelineKey::TONEMAP_IN_SHADER, &skin, true), "tone mapped in the shader");
-        assert!(!skin_split_applies(true, &main, MeshPipelineKey::DEPTH_PREPASS | MeshPipelineKey::VIEW_PROJECTION_ORTHOGRAPHIC, &skin, true), "orthographic");
+        assert!(!skin_split_applies(true, &main, MeshPipelineKey::DEPTH_PREPASS | MeshPipelineKey::NVF_SKIN_ALBEDO | MeshPipelineKey::VIEW_PROJECTION_ORTHOGRAPHIC, &skin, true), "orthographic");
         assert!(!skin_split_applies(true, &main, view, &skin, false), "an input view");
         for (what, key) in [
             ("not skin", NifSurfaceKey { skin: false, facegen: false, ..skin }),

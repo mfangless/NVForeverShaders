@@ -107,6 +107,8 @@ bitflags::bitflags! {
         // NVForever sun visibility's light volume: bindings 45-46, with
         // `NVF_SUN_VISIBILITY` only ([`NvfSunVisibilityBindings::cloud_volume`]).
         const NVF_CLOUD_VOLUME                 = 1 << 19;
+        // NVForever skin colour: binding 47 ([`NvfSkinAlbedoBindings`]).
+        const NVF_SKIN_ALBEDO                  = 1 << 20;
     }
 }
 
@@ -162,6 +164,21 @@ pub struct NvfSunVisibilityBindings {
 pub struct NvfAmbientOcclusionBindings {
     pub uniform: Buffer,
     pub texture: TextureView,
+}
+
+/// NVForever skin colour (2026-11-26, engine/vendor/README.md): what a view's mesh view bind
+/// group holds for the game's screen-space skin scattering (nvforever `sss/screen.rs`), at
+/// binding 47 (`Rgba8Unorm` post-scatter colour + mark) and binding 48 (`Rgba16Float` HDR
+/// RGB specular light, kept out of the diffusion blur). A view with it gets
+/// [`MeshPipelineViewLayoutKey::NVF_SKIN_ALBEDO`] and those bindings, and its pipelines
+/// `MeshPipelineKey::NVF_SKIN_ALBEDO` with the shader def of the same name. As
+/// [`NvfAmbientOcclusionBindings`]: inserted or removed only during extraction; the texture
+/// views may change before `RenderSystems::PrepareBindGroups`. Bevy inserts none; without
+/// it views are as upstream's.
+#[derive(Component, Clone)]
+pub struct NvfSkinAlbedoBindings {
+    pub texture: TextureView,
+    pub spec: TextureView,
 }
 
 impl MeshPipelineViewLayoutKey {
@@ -254,6 +271,10 @@ impl From<MeshPipelineKey> for MeshPipelineViewLayoutKey {
         // NVForever ambient occlusion.
         if value.contains(MeshPipelineKey::NVF_AMBIENT_OCCLUSION) {
             result |= MeshPipelineViewLayoutKey::NVF_AMBIENT_OCCLUSION;
+        }
+        // NVForever skin colour.
+        if value.contains(MeshPipelineKey::NVF_SKIN_ALBEDO) {
+            result |= MeshPipelineViewLayoutKey::NVF_SKIN_ALBEDO;
         }
 
         result
@@ -615,6 +636,19 @@ fn layout_entries(
             ),
         ));
     }
+    // NVForever skin colour ([`NvfSkinAlbedoBindings`]).
+    if layout_key.contains(MeshPipelineViewLayoutKey::NVF_SKIN_ALBEDO) {
+        entries = entries.extend_with_indices((
+            (
+                47,
+                texture_storage_2d(TextureFormat::Rgba8Unorm, StorageTextureAccess::WriteOnly),
+            ),
+            (
+                48,
+                texture_storage_2d(TextureFormat::Rgba16Float, StorageTextureAccess::WriteOnly),
+            ),
+        ));
+    }
 
     let mut binding_array_entries = DynamicBindGroupLayoutEntries::new(ShaderStages::FRAGMENT);
     if layout_key.contains(MeshPipelineViewLayoutKey::ENVIRONMENT_MAP) {
@@ -786,6 +820,8 @@ pub fn prepare_mesh_view_bind_groups(
             Option<&NvfSunVisibilityBindings>,
             // NVForever ambient occlusion.
             Option<&NvfAmbientOcclusionBindings>,
+            // NVForever skin colour.
+            Option<&NvfSkinAlbedoBindings>,
         ),
         Has<ExtractedAtmosphere>,
         (
@@ -861,6 +897,7 @@ pub fn prepare_mesh_view_bind_groups(
                 render_view_irradiance_volumes,
                 nvf_sun_visibility,
                 nvf_ambient_occlusion,
+                nvf_skin_albedo,
             ),
             has_atmosphere,
             (
@@ -1072,6 +1109,13 @@ pub fn prepare_mesh_view_bind_groups(
                 layout_key |= MeshPipelineViewLayoutKey::NVF_AMBIENT_OCCLUSION;
                 entries = entries
                     .extend_with_indices(((43, ao.uniform.as_entire_binding()), (44, &ao.texture)));
+            }
+
+            // NVForever skin colour: present exactly when `check_views_need_specialization`
+            // gave the view's pipelines `MeshPipelineKey::NVF_SKIN_ALBEDO`.
+            if let Some(skin) = nvf_skin_albedo {
+                layout_key |= MeshPipelineViewLayoutKey::NVF_SKIN_ALBEDO;
+                entries = entries.extend_with_indices(((47, &skin.texture), (48, &skin.spec)));
             }
 
             let environment_map_bind_group_entries =

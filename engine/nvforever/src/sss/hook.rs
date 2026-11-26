@@ -15,6 +15,7 @@ const IMPORT_TEXT: &str = "// NVForever subsurface scattering (nvforever sss.rs)
 @if(NVF_FOLIAGE_SSS) import nvforever::sss::{nvf_sss_point_foliage, nvf_sss_spot_foliage, nvf_sss_directional_foliage};
 @if(NVF_SKIN_SSS && NVF_SKIN_SPLIT) import nvforever::sss::nvf_skin_last_diffuse;
 @if(NVF_SKIN_SSS && ENVIRONMENT_MAP) import nvforever::sss::nvf_skin_sky;
+@if(NVF_SKIN_SSS && NVF_SKIN_SPLIT) import nvforever::sss::nvf_skin_post_scatter;
 @if(NVF_HAIR) import nvforever::sss::{nvf_sss_point_hair, nvf_sss_spot_hair, nvf_sss_directional_hair};
 @if(NVF_OUTFIT) import nvforever::sss::{nvf_sss_point_outfit, nvf_sss_spot_outfit, nvf_sss_directional_outfit};
 @if(NVF_OUTFIT && ENVIRONMENT_MAP) import nvforever::sss::nvf_outfit_sheen_sky;
@@ -91,15 +92,23 @@ const SKIN_SPEC_TEXT: &str = "    @if(NVF_SKIN_SSS && NVF_SKIN_SPLIT)
 ";
 
 /// Physical PBR: the skin's mark in the picture's alpha, which the screen-space scattering
-/// reads and puts back to 1 (sss/screen.rs `SKIN_MARK`): -1 less the specular light's
-/// luminance, as drawn (times the exposure).
+/// reads and puts back to 1 (sss/screen.rs `SKIN_MARK`): -1.0 for skin; the full HDR RGB
+/// specular light is written to binding 48 (`nvf_skin_spec_buf`), and the diffuse share is
+/// written to the main target divided by its post-scatter colour (`nvf_skin_post_scatter`).
 const TOTAL_ANCHOR: &str = "    output_color = vec4<f32>(
         (view_bindings::view.exposure * (transmitted_light + direct_light + indirect_light)) + emissive_light,
         output_color.a
     );
 ";
 const SKIN_MARK_TEXT: &str = "    @if(NVF_SKIN_SSS && NVF_SKIN_SPLIT)
-    output_color.a = -1.0 - view_bindings::view.exposure * dot(nvf_skin_spec, vec3(0.2126, 0.7152, 0.0722));
+    let nvf_skin_spec_hdr = view_bindings::view.exposure * nvf_skin_spec;
+    // The diffuse share leaves with the colour's post-scatter part divided out, which the
+    // pass multiplies back in, while the exact HDR RGB specular goes to binding 48
+    // (sss.wesl `nvf_skin_post_scatter`).
+    @if(NVF_SKIN_SSS && NVF_SKIN_SPLIT)
+    let nvf_skin_post = nvf_skin_post_scatter(in.frag_coord, diffuse_color, nvf_skin_spec_hdr);
+    @if(NVF_SKIN_SSS && NVF_SKIN_SPLIT)
+    output_color = vec4(max(output_color.rgb - nvf_skin_spec_hdr, vec3(0.0)) / nvf_skin_post, -1.0);
 ";
 
 const POINT_ANCHOR: &str = "        let light_contrib = lighting::point_light(light_id, &lighting_input, enable_diffuse, true);\n";

@@ -14,8 +14,10 @@
 //
 // blur_h: the main texture in, the horizontal blur out (rgb: diffuse light, a: s, or -1
 //   off the skin).
-// blur_v: that in, the vertical blur drawn over the main texture's skin with alpha 1 (the
-//   mark taken out), everything else discarded.
+// blur_v: that in, the vertical blur times the skin's post-scatter colour (`albedo`, the
+//   skin's fragments wrote it, sss.wesl `nvf_skin_post_scatter`: its square root; their
+//   diffuse light came with it divided out) drawn over the main texture's skin with alpha 1
+//   (the mark taken out), everything else discarded.
 //
 // Each tap is read between pixels along the pass's axis: the two texels either side of its
 // offset, each checked on its own (skin, depth), mixed by the fraction. The step is
@@ -42,8 +44,10 @@ struct Ssss {
 @group(0) @binding(0) var depth: texture_depth_2d;
 @group(0) @binding(1) var<uniform> ssss: Ssss;
 @group(0) @binding(2) var src: texture_2d<f32>;
+@if(VERTICAL) @group(0) @binding(3) var albedo: texture_2d<f32>;
+@if(VERTICAL) @group(0) @binding(4) var spec_tex: texture_2d<f32>;
 
-// Alpha below this marks skin (-1 - s, s >= 0); every other surface writes 0 to 1.
+// Alpha below this marks skin (-1.0); every other surface writes 0 to 1.
 const SKIN_MARK: f32 = -0.5;
 // Millimetres in one game unit (the same scale as sss.wesl's shadow-map thickness).
 const MM_PER_UNIT: f32 = 14.3;
@@ -52,14 +56,13 @@ fn is_first_person(raw_d: f32) -> bool {
     return raw_d > 1.0 - FIRST_PERSON_DEPTH_SHARE;
 }
 
-// The skin's diffuse light and s at p, or a < 0 off the skin.
+// The skin's diffuse light at p (a >= 0 on skin, < 0 off the skin).
 @if(!VERTICAL) fn fetch(p: vec2<i32>) -> vec4<f32> {
     let c = textureLoad(src, p, 0);
     if c.a > SKIN_MARK {
         return vec4(c.rgb, -1.0);
     }
-    let s = -1.0 - c.a;
-    return vec4(c.rgb - vec3(s), s);
+    return vec4(c.rgb, 0.0);
 }
 
 @if(VERTICAL) fn fetch(p: vec2<i32>) -> vec4<f32> {
@@ -143,6 +146,12 @@ fn blur(px: vec2<i32>, dir: vec2<i32>, centre: vec4<f32>, z: f32, scale_in: f32)
     return sum;
 }
 
+// The skin's post-scatter colour at p (sss.wesl `nvf_skin_post_scatter`).
+@if(VERTICAL) fn post_scatter(p: vec2<i32>) -> vec3<f32> {
+    let a = textureLoad(albedo, p, 0).rgb;
+    return a * a;
+}
+
 @if(!VERTICAL) @fragment
 fn blur_h(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let px = inside(vec2<i32>(floor(in.position.xy)));
@@ -181,5 +190,6 @@ fn blur_v(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
             light = blur(px, vec2(0, 1), centre, z, scale);
         }
     }
-    return vec4(max(light + vec3(centre.a), vec3(0.0)), 1.0);
+    let spec = textureLoad(spec_tex, px, 0).rgb;
+    return vec4(max(light * post_scatter(px) + spec, vec3(0.0)), 1.0);
 }

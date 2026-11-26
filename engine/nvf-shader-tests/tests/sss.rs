@@ -118,11 +118,14 @@ fn skin_and_foliage_sss_compile_across_both_lighting_modes() {
 
 /// The screen-space skin scattering's skin (`NVF_SKIN_SPLIT`, physical PBR only; nvforever
 /// sss/screen.rs): the diffuse light kept apart per light composes with the image-based
-/// light on and off and the ambient occlusion on and off, baked curvature or not.
+/// light on and off and the ambient occlusion on and off, baked curvature or not. The split
+/// needs a depth prepass and the skin's colour buffer (nvf_assets nif_material.rs
+/// `skin_split_applies`), which its fragments write at binding 47.
 #[test]
 fn split_skin_composes_with_its_diffuse_share() {
     let mut compiler = Compiler::with_sss(true);
-    for base in [&["NVF_SKIN_SSS", "NVF_SKIN_SPLIT"][..], &["NVF_SKIN_SSS", "NVF_SKIN_SPLIT", "VERTEX_UVS_B", "FACEGEN_TINT"][..]] {
+    let split = ["NVF_SKIN_SSS", "NVF_SKIN_SPLIT", "DEPTH_PREPASS", "NVF_SKIN_ALBEDO"];
+    for base in [&split[..], &[&split[..], &["VERTEX_UVS_B", "FACEGEN_TINT"][..]].concat()[..]] {
         for env_map in [false, true] {
             for ao in [false, true] {
                 let mut defs = base.to_vec();
@@ -139,10 +142,15 @@ fn split_skin_composes_with_its_diffuse_share() {
                     "{defs:?}: the diffuse share is kept"
                 );
                 assert!(has_fn(&compiled, "nvf_skin_transmittance_profile"), "{defs:?}: transmittance kept");
+                assert!(has_fn(&compiled, "nvf_skin_post_scatter"), "{defs:?}: the colour split");
+                assert!(binds(&compiled, 47), "{defs:?}: the skin's colour buffer");
+                assert!(binds(&compiled, 48), "{defs:?}: the skin's specular buffer");
                 assert_eq!(has_fn(&compiled, "nvf_skin_sky"), env_map, "{defs:?}: the sky's light on skin");
             }
         }
     }
+    let unsplit = compiler.compile("nvf_assets/nif_material.wesl", &["NVF_SKIN_SSS", "NVF_PHYSICAL_PBR", "DEPTH_PREPASS"]);
+    assert!(!binds(&unsplit, 47) && !binds(&unsplit, 48) && !has_fn(&unsplit, "nvf_skin_post_scatter"), "no colour buffer without the split");
 }
 
 /// The screen-space skin scattering's two passes (nvforever sss_screen.wesl).
@@ -159,6 +167,8 @@ fn screen_space_skin_blur_compiles_both_directions() {
         let entries: Vec<_> = compiled.module.entry_points.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(entries, [entry], "{defs:?}");
         assert!(binds(&compiled, 0) && binds(&compiled, 1) && binds(&compiled, 2), "{defs:?}: depth, uniform, source");
+        assert_eq!(binds(&compiled, 3), entry == "blur_v", "{defs:?}: the skin's colour, read by blur_v");
+        assert_eq!(binds(&compiled, 4), entry == "blur_v", "{defs:?}: the skin's specular, read by blur_v");
     }
 }
 
@@ -328,7 +338,7 @@ fn sss_materials_compile_with_all_physical_diffuse_models() {
             ),
             (
                 "nvf_assets/nif_material.wesl",
-                &["NVF_PHYSICAL_PBR", "NVF_SKIN_SSS", "NVF_SKIN_SPLIT", "VERTEX_UVS_B", "ENVIRONMENT_MAP"][..],
+                &["NVF_PHYSICAL_PBR", "NVF_SKIN_SSS", "NVF_SKIN_SPLIT", "DEPTH_PREPASS", "NVF_SKIN_ALBEDO", "VERTEX_UVS_B", "ENVIRONMENT_MAP"][..],
             ),
             (
                 "nvf_assets/nif_material.wesl",

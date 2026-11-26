@@ -19,11 +19,40 @@ import bevy_pbr::render::{
 @if(ENVIRONMENT_MAP) import bevy_pbr::light_probe::environment_map::compute_radiances;
 @if(ENVIRONMENT_MAP) import bevy_pbr::render::pbr_lighting::{LightingInput, LAYER_BASE};
 @if(ENVIRONMENT_MAP) import bevy_pbr::render::clustered_forward::ClusterableObjectIndexRanges;
+@if(NVF_SKIN_ALBEDO && DEPTH_PREPASS) import bevy_pbr::prepass::utils::prepass_depth;
 import bevy_render::maths::PI;
 
 // NVF_SKIN_SPLIT: the diffuse light of the last nvf_skin_eval, the share the screen-space
 // scattering blurs (sss/screen.rs). The lighting hook (sss/hook.rs) adds it up per light.
 var<private> nvf_skin_last_diffuse: vec3<f32>;
+
+// NVF_SKIN_SPLIT: pre- and post-scatter texturing (Jimenez et al. 2015, "Separable
+// Subsurface Scattering": L = A^(1-p) x blur(A^p x E), A the skin's colour, E its light).
+// The face's pigment, the lips' red, the lash line and moles lie in a thin layer over the
+// scattering dermis [documented: Donner et al. 2008, "A Layered, Heterogeneous Reflectance
+// Model for Acquiring and Rendering Human Skin"], so most of the colour is applied after the
+// blur and stays sharp; blurring A x E whole smeared the lips onto the chin. The skin's
+// fragments draw their diffuse light divided by A^(1-p) and write A^(1-p) (its square root,
+// for the dark end's precision in 8 bits) to binding 47 (bevy_pbr NvfSkinAlbedoBindings,
+// sss/screen.rs), which the pass multiplies back in after the blur. Only a fragment that
+// will be seen writes: the storage write runs the shader for hidden fragments too, so its
+// depth is checked against the prepass's, as the main pass's equal test does
+// (nif_material.rs `depth_equal`). p 0.25 [hypothesis: skin research notes 2026-11-26
+// §2.2]; the darkest colour taken is NVF_SKIN_ALBEDO_MIN.
+@if(NVF_SKIN_ALBEDO) @group(0) @binding(47) var nvf_skin_albedo: texture_storage_2d<rgba8unorm, write>;
+@if(NVF_SKIN_ALBEDO && NVF_SKIN_SPLIT) @group(0) @binding(48) var nvf_skin_spec_buf: texture_storage_2d<rgba16float, write>;
+const NVF_SKIN_PRE_SCATTER: f32 = 0.12;
+const NVF_SKIN_ALBEDO_MIN: f32 = 0.01;
+
+@if(NVF_SKIN_SPLIT) fn nvf_skin_post_scatter(frag_coord: vec4<f32>, diffuse_color: vec3<f32>, spec_hdr: vec3<f32>) -> vec3<f32> {
+    let post = pow(clamp(diffuse_color, vec3(NVF_SKIN_ALBEDO_MIN), vec3(1.0)), vec3(1.0 - NVF_SKIN_PRE_SCATTER));
+    if prepass_depth(frag_coord, 0u) == frag_coord.z {
+        let px = vec2<i32>(floor(frag_coord.xy));
+        textureStore(nvf_skin_albedo, px, vec4(sqrt(post), 1.0));
+        textureStore(nvf_skin_spec_buf, px, vec4(max(spec_hdr, vec3(0.0)), 1.0));
+    }
+    return post;
+}
 
 fn nvf_sss_srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
     let x = max(c, vec3(0.0));

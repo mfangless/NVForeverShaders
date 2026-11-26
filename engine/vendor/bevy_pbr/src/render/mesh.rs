@@ -391,6 +391,8 @@ pub fn check_views_need_specialization(
             Option<&NvfSunVisibilityBindings>,
             // NVForever ambient occlusion.
             Has<NvfAmbientOcclusionBindings>,
+            // NVForever skin colour.
+            Has<NvfSkinAlbedoBindings>,
         ),
     )>,
     mut seen_views: Local<HashSet<RetainedViewEntity>>,
@@ -417,6 +419,7 @@ pub fn check_views_need_specialization(
             has_contact_shadows,
             nvf_sun_visibility,
             nvf_ambient_occlusion,
+            nvf_skin_albedo,
         ),
     ) in views.iter_mut()
     {
@@ -488,6 +491,11 @@ pub fn check_views_need_specialization(
         // the view's bind group.
         if nvf_ambient_occlusion {
             view_key |= MeshPipelineKey::NVF_AMBIENT_OCCLUSION;
+        }
+
+        // NVForever skin colour: likewise.
+        if nvf_skin_albedo {
+            view_key |= MeshPipelineKey::NVF_SKIN_ALBEDO;
         }
 
         if view.invert_culling {
@@ -3171,7 +3179,10 @@ bitflags::bitflags! {
         // NVForever sun visibility's light volume (engine/vendor/README.md): the view's
         // `NvfSunVisibilityBindings` has `cloud_volume` (bindings 45-46).
         const NVF_CLOUD_VOLUME_VISIBILITY       = 1 << 29;
-        const LAST_FLAG                         = Self::NVF_CLOUD_VOLUME_VISIBILITY.bits();
+        // NVForever skin colour (engine/vendor/README.md): the view has
+        // `NvfSkinAlbedoBindings` (binding 47).
+        const NVF_SKIN_ALBEDO                   = 1 << 30;
+        const LAST_FLAG                         = Self::NVF_SKIN_ALBEDO.bits();
 
         const ALL_PREPASS_BITS                  = Self::DEPTH_PREPASS.bits()
                                                 | Self::NORMAL_PREPASS.bits()
@@ -3788,6 +3799,11 @@ impl SpecializedMeshPipeline for MeshPipeline {
         // occlusion there); the layout keeps bindings 43-44 either way.
         if key.contains(MeshPipelineKey::NVF_AMBIENT_OCCLUSION) && depth_write_enabled {
             shader_defs.push("NVF_AMBIENT_OCCLUSION".into());
+        }
+
+        // NVForever skin colour (engine/vendor/README.md): binding 47 is in the layout.
+        if key.contains(MeshPipelineKey::NVF_SKIN_ALBEDO) {
+            shader_defs.push("NVF_SKIN_ALBEDO".into());
         }
 
         if self.binding_arrays_are_usable {

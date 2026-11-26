@@ -599,11 +599,29 @@ component; without it the layouts and shader defs are upstream's, and the pipeli
 the same keys numbered differently (the packed fields above the new bit moved up by one).
 As for the sun visibility, a meshlet view must not get the component.
 
-Another change (the skin's and the hair's shadow test, 2026-11-26,
-docs/design/graphics-enhanced.md, experimental): `src/render/pbr_functions.wesl` (the
-`NVForever skin and hair` blocks): under nvforever's `NVF_SKIN_SSS` or `NVF_HAIR` defs, the
-facing test is the geometric normal's, to 30 degrees past the terminator (`@elif`), since
-the skin's and the hair's light wraps past it.
+Another change (the skin's colour for the screen-space skin scattering, 2026-11-26,
+docs/design/graphics-enhanced.md, experimental), each part marked `NVForever skin colour`,
+for nvforever's `sss/screen.rs`, built the same way as the ambient occlusion's:
+
+- `src/render/mesh_view_bindings.rs`: the render-world view component
+  `NvfSkinAlbedoBindings` (two write-only storage textures the size of the main texture:
+  `Rgba8Unorm` post-scatter albedo/mark at binding 47 and `Rgba16Float` HDR RGB specular
+  at binding 48), the layout key bit `MeshPipelineViewLayoutKey::NVF_SKIN_ALBEDO` and
+  bindings 47–48 of the mesh view bind group, present only for a view with it.
+- `src/render/mesh.rs`: `MeshPipelineKey::NVF_SKIN_ALBEDO` (bit 30; the bit fields above it
+  move up by one more, the colour target format then ending at bit 51, still below the base
+  mesh key's bits from 58), set by `check_views_need_specialization` from the same
+  component, and the shader def of the same name.
+
+The shader that writes the binding is nvforever's (`sss.wesl` `nvf_skin_post_scatter`,
+reached from the `sss/hook.rs` edits of `apply_pbr_lighting`), only in pipelines that also
+carry nvf-assets' `NVF_SKIN_SPLIT`, which needs the key. Bevy inserts no such component;
+without it the layouts and shader defs are upstream's.
+
+Also `src/render/pbr_functions.wesl` (the `NVForever shadow early-out` blocks below): under
+nvforever's `NVF_SKIN_SSS` or `NVF_HAIR` defs, the facing test is the geometric normal's,
+to 30 degrees past the terminator (`@elif`), since the skin's and the hair's light wraps
+past it.
 
 Graphics pass 2026-11-23, four more changes:
 

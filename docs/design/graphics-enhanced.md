@@ -4464,6 +4464,7 @@ Community Shaders code was read or used (the clean-room rule of #1503).
 | pore specular occlusion | 1 − 2 (1 − N·Ng) | [design] (2.5 matte, 1.5 wet) |
 | skin ambient occlusion (ssao_lighting.wesl `nvf_skin_ambient_occlusion`) | v^(0.7, 0.9, 1.05), floor (0.15, 0.08, 0.05) (tuned 2026-11-26 from the notes' 0.42-1.15 and 0.38-0.12: red eyelid rims); relaxed by 0.55 under linear luma 0.04-0.18 | [hypothesis] after Jimenez et al. 2016 |
 | sun contact shadow on skin | a quarter | [hypothesis] |
+| `NVF_SKIN_PRE_SCATTER` (sss.wesl) | 0.25 | [hypothesis] within Jimenez et al. 2015's range |
 | tap slope floor (sss_screen.wesl `tilt`) | 0.35 | [hypothesis] |
 | `EYE_IRIS_CENTRE`, `EYE_IRIS_RADIUS` (nif_material.wesl) | (0.50, 0.44), 0.19 | [observed: `eyelefthuman.nif`, `eyeblue.dds`, `eyedarkbrown.dds`] |
 | `EYE_IRIS_DEPTH` | 0.17 units | [hypothesis] about 2.5 mm, the human anterior chamber |
