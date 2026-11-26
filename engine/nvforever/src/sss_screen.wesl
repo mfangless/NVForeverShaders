@@ -16,6 +16,11 @@
 //   off the skin).
 // blur_v: that in, the vertical blur drawn over the main texture's skin with alpha 1 (the
 //   mark taken out), everything else discarded.
+//
+// Each tap is read between pixels along the pass's axis: the two texels either side of its
+// offset, each checked on its own (skin, depth), mixed by the fraction. The step is
+// shortened by the surface's slope along the axis (`tilt`; Jimenez et al. 2015): the
+// kernel's millimetres lie on the surface, which a tilted surface foreshortens on screen.
 
 import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput;
 import nvf_assets::first_person_depth::FIRST_PERSON_DEPTH_SHARE;
@@ -72,28 +77,66 @@ fn px_per_mm(z: f32) -> f32 {
     return select(0.0, scale, scale * ssss.params.w >= 0.5);
 }
 
-// One direction of the blur. A tap off the skin, or on another surface (a depth step
-// larger than the offset can explain: an ear in front of the head, the chin over the
-// neck), takes the centre's light instead, so light neither leaves nor enters the skin
-// there (Jimenez et al. 2009 "follow the surface").
-fn blur(px: vec2<i32>, dir: vec2<i32>, centre: vec4<f32>, z: f32, scale: f32) -> vec3<f32> {
+// The light of the texel `step` pixels from px along dir, for a tap `reach` mm out. A texel
+// off the skin, or on another surface (a depth step larger than the offset can explain: an
+// ear in front of the head, the chin over the neck), gives the centre's light instead, so
+// light neither leaves nor enters the skin there (Jimenez et al. 2009 "follow the surface").
+fn tap_light(px: vec2<i32>, dir: vec2<i32>, step: i32, centre: vec4<f32>, z: f32, reach: f32) -> vec3<f32> {
+    if step == 0 {
+        return centre.rgb;
+    }
+    let p = inside(px + dir * step);
+    let tap = fetch(p);
+    let raw = textureLoad(depth, p, 0);
+    if tap.a >= 0.0 && raw > 0.0 && !is_first_person(raw) {
+        let dz_mm = abs(ssss.params.y / raw - z) * MM_PER_UNIT;
+        let away = smoothstep(0.85 * reach + 1.0, 1.85 * reach + 2.5, dz_mm);
+        return mix(tap.rgb, centre.rgb, away);
+    }
+    return centre.rgb;
+}
+
+// The view distance at p, or -1 off the world (no depth, the first-person shapes).
+fn distance_at(p: vec2<i32>) -> f32 {
+    let raw = textureLoad(depth, inside(p), 0);
+    return select(-1.0, ssss.params.y / max(raw, 1e-12), raw > 0.0 && !is_first_person(raw));
+}
+
+// The share of `scale` along dir the surface's slope leaves: 1 / sqrt(1 + slope²), slope
+// the depth's change per millimetre across the screen, the gentler side's (a silhouette's
+// step on one side is no slope), no less than 0.35 [hypothesis: skin research notes
+// 2026-11-26 §2.1].
+fn tilt(px: vec2<i32>, dir: vec2<i32>, z: f32, scale: f32) -> f32 {
+    let a = distance_at(px - dir);
+    let b = distance_at(px + dir);
+    var dz = 1e9;
+    if a > 0.0 {
+        dz = min(dz, abs(z - a));
+    }
+    if b > 0.0 {
+        dz = min(dz, abs(b - z));
+    }
+    if dz >= 1e9 {
+        return 1.0;
+    }
+    let slope = dz * MM_PER_UNIT * scale;
+    return clamp(inverseSqrt(1.0 + slope * slope), 0.35, 1.0);
+}
+
+// One direction of the blur.
+fn blur(px: vec2<i32>, dir: vec2<i32>, centre: vec4<f32>, z: f32, scale_in: f32) -> vec3<f32> {
+    let scale = scale_in * tilt(px, dir, z, scale_in);
     var sum = vec3(0.0);
     for (var i = 0u; i < TAPS; i++) {
         let k = ssss.kernel[i];
-        let step = i32(round(k.a * scale));
-        if step == 0 {
-            sum += centre.rgb * k.rgb;
-            continue;
-        }
-        let p = inside(px + dir * step);
-        let tap = fetch(p);
-        let raw = textureLoad(depth, p, 0);
-        var light = centre.rgb;
-        if tap.a >= 0.0 && raw > 0.0 && !is_first_person(raw) {
-            let dz_mm = abs(ssss.params.y / raw - z) * MM_PER_UNIT;
-            let reach = abs(k.a);
-            let away = smoothstep(2.0 * reach, 4.0 * reach + 4.0, dz_mm);
-            light = mix(tap.rgb, centre.rgb, away);
+        let at = k.a * scale;
+        let lo = floor(at);
+        let t = at - lo;
+        let step = i32(lo);
+        let reach = abs(k.a);
+        var light = tap_light(px, dir, step, centre, z, reach);
+        if t > 1e-3 {
+            light = mix(light, tap_light(px, dir, step + 1, centre, z, reach), t);
         }
         sum += light * k.rgb;
     }

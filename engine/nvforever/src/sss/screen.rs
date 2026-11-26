@@ -21,6 +21,12 @@
 //! 3. `blur_v`: blurred along y, `s` added back, drawn over the main texture's skin with
 //!    alpha 1, so nothing after this pass sees the mark.
 //!
+//! The taps are read between pixels along the blur's axis (two texels, each checked for
+//! skin and depth on its own, mixed by the fraction), so the narrow green and blue taps
+//! still blur where they fall inside one pixel, and each pass's step is shortened by the
+//! surface's slope along its axis (Jimenez et al. 2015: the kernel is on the surface, a
+//! tilted surface's millimetres are shorter on screen).
+//!
 //! Views with multisampling are left out (their skin keeps the pre-integration): the
 //! multisampled main texture is a render attachment only (vendored bevy_render
 //! `prepare_view_targets`), so no pass can read its samples or put the mark back per sample.
