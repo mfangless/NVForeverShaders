@@ -744,7 +744,15 @@ fn nvf_hair_eval(T_in: vec3<f32>, N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, albe
     // shell, silhouette included, 6.8 times Lambert at N.V 0.15 for dark brown hair: a grey
     // sheen over hair that read as see-through [engineering choice, from a CPU copy].
     let shell = saturate(ndl);
-    return diffuse + (spec_r * NVF_HAIR_R_SHARE + spec_trt) * (s * shell);
+    // Soften TRT wrap and add a grazing backlit rim only away from front-lit L = V, where
+    // `dot(V, -L)` is negative so front lighting keeps zero grey sheen.
+    let side_back = saturate(0.5 - 0.5 * dot(V, L));
+    let shell_trt = mix(shell, saturate((ndl + 0.25) / 1.25), side_back);
+    let rim_nv = pow(1.0 - saturate(dot(N, V)), 2.5);
+    let fwd_vl = pow(saturate(dot(V, -L) * 0.5 + 0.5), 3.0);
+    let side_lit = saturate((ndl + 0.55) / 1.55);
+    let hair_rim = pow(max(albedo, vec3(1e-4)), vec3(0.75)) * (rim_nv * fwd_vl * side_lit * s * 0.35);
+    return diffuse + (spec_r * NVF_HAIR_R_SHARE * shell + spec_trt * shell_trt) * s + hair_rim;
 }
 
 fn nvf_sss_clustered_hair(
