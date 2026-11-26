@@ -143,6 +143,7 @@ fn split_skin_composes_with_its_diffuse_share() {
                 );
                 assert!(has_fn(&compiled, "nvf_skin_transmittance_profile"), "{defs:?}: transmittance kept");
                 assert!(has_fn(&compiled, "nvf_skin_post_scatter"), "{defs:?}: the colour split");
+                assert!(has_fn(&compiled, "skin_strand_noise"), "{defs:?}: the hairline's strand noise");
                 assert!(binds(&compiled, 47), "{defs:?}: the skin's colour buffer");
                 assert!(binds(&compiled, 48), "{defs:?}: the skin's specular buffer");
                 assert_eq!(has_fn(&compiled, "nvf_skin_sky"), env_map, "{defs:?}: the sky's light on skin");
@@ -151,6 +152,25 @@ fn split_skin_composes_with_its_diffuse_share() {
     }
     let unsplit = compiler.compile("nvf_assets/nif_material.wesl", &["NVF_SKIN_SSS", "NVF_PHYSICAL_PBR", "DEPTH_PREPASS"]);
     assert!(!binds(&unsplit, 47) && !binds(&unsplit, 48) && !has_fn(&unsplit, "nvf_skin_post_scatter"), "no colour buffer without the split");
+}
+
+/// Hair in a view with the skin's colour buffer marks its pixels for the hairline's shade
+/// (nvforever sss.wesl `nvf_hair_mark`, binding 47); without the buffer it does not.
+#[test]
+fn hair_marks_the_hairline_with_the_colour_buffer() {
+    let mut compiler = Compiler::with_sss(true);
+    let hair = ["NVF_HAIR", "NVF_PHYSICAL_PBR", "VERTEX_UVS", "VERTEX_UVS_A", "STANDARD_MATERIAL_BASE_COLOR_TEXTURE", "DEPTH_PREPASS"];
+    for blend in [false, true] {
+        let mut defs = hair.to_vec();
+        defs.push("NVF_SKIN_ALBEDO");
+        if blend {
+            defs.push("BLEND_ALPHA");
+        }
+        let compiled = compiler.compile("nvf_assets/nif_material.wesl", &defs);
+        assert!(has_fn(&compiled, "nvf_hair_mark") && binds(&compiled, 47), "{defs:?}: hair marks its pixels");
+    }
+    let unbound = compiler.compile("nvf_assets/nif_material.wesl", &hair);
+    assert!(!has_fn(&unbound, "nvf_hair_mark") && !binds(&unbound, 47), "no mark without the buffer");
 }
 
 /// The screen-space skin scattering's two passes (nvforever sss_screen.wesl).

@@ -39,19 +39,35 @@ var<private> nvf_skin_last_diffuse: vec3<f32>;
 // depth is checked against the prepass's, as the main pass's equal test does
 // (nif_material.rs `depth_equal`). p 0.25 [hypothesis: skin research notes 2026-11-26
 // §2.2]; the darkest colour taken is NVF_SKIN_ALBEDO_MIN.
+//
+// The texture's alpha tells the pass what drew there (sss/screen.rs clears it to
+// NVF_MARK_OTHER each frame): skin, NVF_MARK_SKIN plus its strand noise (nif-assets
+// nif_material.wesl `skin_strand_noise`, carried in `material.ior`) times NVF_MARK_STRAND;
+// hair (NVF_HAIR, `nvf_hair_mark`), 0. The pass shades the skin beside the hair with them
+// (sss_screen.wesl `hairline`).
 @if(NVF_SKIN_ALBEDO) @group(0) @binding(47) var nvf_skin_albedo: texture_storage_2d<rgba8unorm, write>;
 @if(NVF_SKIN_ALBEDO && NVF_SKIN_SPLIT) @group(0) @binding(48) var nvf_skin_spec_buf: texture_storage_2d<rgba16float, write>;
 const NVF_SKIN_PRE_SCATTER: f32 = 0.12;
 const NVF_SKIN_ALBEDO_MIN: f32 = 0.01;
+const NVF_MARK_SKIN: f32 = 0.6;
+const NVF_MARK_STRAND: f32 = 0.4;
 
-@if(NVF_SKIN_SPLIT) fn nvf_skin_post_scatter(frag_coord: vec4<f32>, diffuse_color: vec3<f32>, spec_hdr: vec3<f32>) -> vec3<f32> {
+@if(NVF_SKIN_SPLIT) fn nvf_skin_post_scatter(frag_coord: vec4<f32>, diffuse_color: vec3<f32>, strand: f32, spec_hdr: vec3<f32>) -> vec3<f32> {
     let post = pow(clamp(diffuse_color, vec3(NVF_SKIN_ALBEDO_MIN), vec3(1.0)), vec3(1.0 - NVF_SKIN_PRE_SCATTER));
     if prepass_depth(frag_coord, 0u) == frag_coord.z {
         let px = vec2<i32>(floor(frag_coord.xy));
-        textureStore(nvf_skin_albedo, px, vec4(sqrt(post), 1.0));
+        textureStore(nvf_skin_albedo, px, vec4(sqrt(post), NVF_MARK_SKIN + NVF_MARK_STRAND * saturate(strand)));
         textureStore(nvf_skin_spec_buf, px, vec4(max(spec_hdr, vec3(0.0)), 1.0));
     }
     return post;
+}
+
+// NVF_HAIR: mark a hair fragment that will be seen (the depth check of
+// nvf_skin_post_scatter) for the hairline's shade.
+@if(NVF_SKIN_ALBEDO && DEPTH_PREPASS) fn nvf_hair_mark(frag_coord: vec4<f32>) {
+    if prepass_depth(frag_coord, 0u) == frag_coord.z {
+        textureStore(nvf_skin_albedo, vec2<i32>(floor(frag_coord.xy)), vec4(0.0));
+    }
 }
 
 fn nvf_sss_srgb_to_linear(c: vec3<f32>) -> vec3<f32> {

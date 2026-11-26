@@ -576,6 +576,39 @@ const BODY_CLEARANCE: f32 = 24.0;
     @builtin(frag_depth) depth: f32,
 }
 
+// NVF_SKIN_SSS: strand noise for the hairline's shade (nvforever sss_screen.wesl `hairline`):
+// streaks running along the texture's v, which on a head runs up and down the forehead and
+// temples, the way the hair grows out of the hairline [hypothesis: the head texture's
+// layout, not measured], about SKIN_STRAND_U across and SKIN_STRAND_V long in texture units
+// [engineering choice: about 1.5 mm by 10 mm on an adult head]. Two octaves of value noise,
+// its contrast raised; in texture space, so it stays on the skin as the head moves.
+const SKIN_STRAND_U: f32 = 400.0;
+const SKIN_STRAND_V: f32 = 60.0;
+
+@if(NVF_SKIN_SSS && !PREPASS_PIPELINE) fn skin_strand_hash(c: vec2<i32>) -> f32 {
+    var h = (bitcast<u32>(c.x) * 1597334677u) ^ (bitcast<u32>(c.y) * 3812015801u);
+    h = h * 0x27d4eb2du;
+    h = h ^ (h >> 15u);
+    return f32(h) * (1.0 / 4294967295.0);
+}
+
+@if(NVF_SKIN_SSS && !PREPASS_PIPELINE) fn skin_value_noise(p: vec2<f32>) -> f32 {
+    let i = vec2<i32>(floor(p));
+    let f = fract(p);
+    let w = f * f * (3.0 - 2.0 * f);
+    let a = skin_strand_hash(i);
+    let b = skin_strand_hash(i + vec2(1, 0));
+    let c = skin_strand_hash(i + vec2(0, 1));
+    let d = skin_strand_hash(i + vec2(1, 1));
+    return mix(mix(a, b, w.x), mix(c, d, w.x), w.y);
+}
+
+@if(NVF_SKIN_SSS && !PREPASS_PIPELINE) fn skin_strand_noise(uv: vec2<f32>) -> f32 {
+    let p = uv * vec2(SKIN_STRAND_U, SKIN_STRAND_V);
+    let n = 0.65 * skin_value_noise(p) + 0.35 * skin_value_noise(p * vec2(2.3, 1.7) + vec2(17.0, 31.0));
+    return smoothstep(0.3, 0.7, n);
+}
+
 // NVF_EYE (an eye shape under NVF_SSS, nif_material.rs `NifSurface::eye`): the iris lies
 // below a clear cornea (nif_spawn.rs gives the eye a clear coat for it), so it is seen
 // through the cornea's refraction, shifting against the white as the view moves, and it
@@ -891,6 +924,13 @@ fn nif_fragment(
             let skin_mask_uv = (standard_material(in.instance_index).uv_transform * vec3(in.uv, 1.0)).xy;
             let skin_mask = normal_map_texel(in.instance_index, skin_mask_uv).a;
             skin_oil = select(SKIN_OIL_UNMASKED, smoothstep(0.03, 0.20, skin_mask), (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_SPECULAR_TEXTURE_BIT) != 0u);
+        }
+        // The hairline's strand noise for the screen-space pass (nvforever sss.wesl
+        // `nvf_skin_post_scatter`), carried in `material.ior`, which skin does not use (Bevy
+        // reads it only for specular transmission), as the curvature rides in `thickness`.
+        pbr_input.material.ior = 0.5;
+        @if(VERTEX_UVS_A) {
+            pbr_input.material.ior = skin_strand_noise(in.uv);
         }
         let skin_w_oil = mix(0.10, 0.22, skin_oil);
         let skin_f0_base = 0.028 * (1.0 - skin_w_oil);

@@ -146,6 +146,60 @@ fn blur(px: vec2<i32>, dir: vec2<i32>, centre: vec4<f32>, z: f32, scale_in: f32)
     return sum;
 }
 
+// The hairline's shade (blur_v): skin beside hair is shaded by it, the light under a
+// hairline's thinning hairs and over the scalp between them being less and warmer, red
+// least taken (it scatters in from the lit skin around). The skin-colour texture's alpha
+// tells what drew each pixel (sss.wesl, NVF_MARK_*: hair 0, skin from 0.6 with its strand
+// noise, anything else the clear's 0.3). Around a skin pixel, rings out to HAIR_REACH_MM
+// are read in eight directions, turned per pixel (a fixed dither); a tap counts if it is
+// hair at about the skin's depth (from HAIR_BACK_MM behind to HAIR_FRONT_MM in front: the
+// head's own hair, not another figure's nor hair seen past the head), the nearer rings
+// more. At the hair's edge about half the taps are hair. The pixel's strand noise widens
+// its reach, so the shade runs out from the hairline in streaks, as hairs do. Independent
+// of how a hair mesh is built (alpha-tested cards, blended shells): only where hair is
+// drawn next to skin counts. [hypothesis: the constants, starting values to tune by eye.]
+const HAIR_REACH_MM: f32 = 6.0;
+const HAIR_FRONT_MM: f32 = 40.0;
+const HAIR_BACK_MM: f32 = 10.0;
+const HAIR_DARK: vec3<f32> = vec3(0.30, 0.36, 0.40);
+const MARK_HAIR_BELOW: f32 = 0.15;
+const MARK_SKIN: f32 = 0.6;
+const MARK_STRAND: f32 = 0.4;
+
+@if(VERTICAL) fn hairline(px: vec2<i32>, z: f32, scale: f32) -> vec3<f32> {
+    let reach_px = HAIR_REACH_MM * scale;
+    if reach_px < 1.0 {
+        return vec3(1.0);
+    }
+    let strand = saturate((textureLoad(albedo, px, 0).a - MARK_SKIN) / MARK_STRAND);
+    let p = vec2<f32>(px);
+    let turn = fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y)) * 0.7853982;
+    var cover = 0.0;
+    var total = 0.0;
+    for (var r = 1u; r <= 4u; r++) {
+        let rr = f32(r) * 0.25;
+        let w = 1.25 - rr;
+        for (var d = 0u; d < 8u; d++) {
+            let a = turn + f32(d) * 0.7853982 + rr * 0.4;
+            let q = inside(px + vec2<i32>(round(vec2(cos(a), sin(a)) * rr * reach_px)));
+            total += w;
+            if textureLoad(albedo, q, 0).a >= MARK_HAIR_BELOW {
+                continue;
+            }
+            let raw = textureLoad(depth, q, 0);
+            if raw <= 0.0 || is_first_person(raw) {
+                continue;
+            }
+            let nearer_mm = (z - ssss.params.y / raw) * MM_PER_UNIT;
+            if nearer_mm > -HAIR_BACK_MM && nearer_mm < HAIR_FRONT_MM {
+                cover += w;
+            }
+        }
+    }
+    let h = saturate(2.0 * (cover / total) * (0.5 + 1.5 * strand));
+    return vec3(1.0) - HAIR_DARK * (h * h * (3.0 - 2.0 * h));
+}
+
 // The skin's post-scatter colour at p (sss.wesl `nvf_skin_post_scatter`).
 @if(VERTICAL) fn post_scatter(p: vec2<i32>) -> vec3<f32> {
     let a = textureLoad(albedo, p, 0).rgb;
@@ -183,13 +237,15 @@ fn blur_v(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     }
     let raw = textureLoad(depth, px, 0);
     var light = centre.rgb;
+    var shade = vec3(1.0);
     if raw > 0.0 && !is_first_person(raw) {
         let z = ssss.params.y / raw;
         let scale = px_per_mm(z);
         if scale > 0.0 {
             light = blur(px, vec2(0, 1), centre, z, scale);
+            shade = hairline(px, z, scale);
         }
     }
     let spec = textureLoad(spec_tex, px, 0).rgb;
-    return vec4(max(light * post_scatter(px) + spec, vec3(0.0)), 1.0);
+    return vec4(max((light * post_scatter(px) + spec) * shade, vec3(0.0)), 1.0);
 }

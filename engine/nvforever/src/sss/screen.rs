@@ -203,6 +203,12 @@ impl Plugin for ScreenSssPlugin {
             .add_systems(Render, prepare.in_set(RenderSystems::PrepareResources))
             .add_systems(
                 Core3d,
+                clear_skin_albedo
+                    .in_set(Core3dSystems::MainPass)
+                    .before(main_opaque_pass_3d),
+            )
+            .add_systems(
+                Core3d,
                 screen_sss_pass
                     .in_set(Core3dSystems::MainPass)
                     .after(main_opaque_pass_3d)
@@ -414,6 +420,32 @@ fn prepare(
     }
 }
 
+/// The skin-colour texture's alpha when nothing marked a pixel this frame (sss.wesl: hair
+/// writes 0, skin from 0.6): cleared before the opaque pass, so a pixel hair or skin left
+/// in an earlier frame does not shade the skin beside it now.
+const ALBEDO_CLEAR_ALPHA: f64 = 0.3;
+
+fn clear_skin_albedo(view: ViewQuery<&SsssView>, mut ctx: RenderContext) {
+    let ssss = view.into_inner();
+    let pass = ctx.command_encoder().begin_render_pass(&RenderPassDescriptor {
+        label: Some("ssss_skin_albedo_clear"),
+        color_attachments: &[Some(RenderPassColorAttachment {
+            view: &ssss.albedo.default_view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: Operations {
+                load: LoadOp::Clear(wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: ALBEDO_CLEAR_ALPHA }),
+                store: StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    drop(pass);
+}
+
 fn screen_sss_pass(
     view: ViewQuery<(&ViewTarget, &ViewPrepassTextures, &SsssView)>,
     pipelines: Res<SsssPipelines>,
@@ -587,6 +619,18 @@ mod tests {
         assert!(source.contains(&format!("const TAPS: u32 = {TAPS}u;")));
         assert!(source.contains(&format!("const MM_PER_UNIT: f32 = {MM_PER_UNIT};")));
         assert_eq!(<SsssUniform as ShaderType>::min_size().get(), (2 + TAPS as u64) * 16);
+    }
+
+    #[test]
+    fn the_marks_agree() {
+        let shader = include_str!("../sss_screen.wesl");
+        let sss = include_str!("../sss.wesl");
+        assert!(sss.contains("const NVF_MARK_SKIN: f32 = 0.6;") && shader.contains("const MARK_SKIN: f32 = 0.6;"));
+        assert!(sss.contains("const NVF_MARK_STRAND: f32 = 0.4;") && shader.contains("const MARK_STRAND: f32 = 0.4;"));
+        assert!(sss.contains("textureStore(nvf_skin_albedo, vec2<i32>(floor(frag_coord.xy)), vec4(0.0));"), "hair writes 0");
+        // The clear lies between hair (0, under MARK_HAIR_BELOW) and skin (from 0.6).
+        assert!(shader.contains("const MARK_HAIR_BELOW: f32 = 0.15;"));
+        const { assert!(ALBEDO_CLEAR_ALPHA > 0.15 && ALBEDO_CLEAR_ALPHA < 0.6) };
     }
 
     #[test]

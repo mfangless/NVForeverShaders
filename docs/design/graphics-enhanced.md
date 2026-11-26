@@ -4448,6 +4448,14 @@ Community Shaders code was read or used (the clean-room rule of #1503).
   N·V 0.15 for dark brown hair), a grey sheen through which the hair looked see-through
   (owner's frames, 2026-11-24). The strand direction comes from the texture's painted
   strokes, as nif.md §6 "Hair strand direction" says.
+- **Hairline shade** (2026-11-26, with the screen-space skin pass): skin beside hair is
+  shaded, warm (red least), in streaks. Hair fragments mark their pixels in the skin-colour
+  texture (sss.wesl `nvf_hair_mark`, binding 47, cleared each frame), skin fragments write
+  a strand noise there (nif_material.wesl `skin_strand_noise`, in the head texture's
+  space so it stays on the skin), and the vertical blur reads the hair's cover round each
+  skin pixel at about its depth (sss_screen.wesl `hairline`), the strand noise widening
+  each pixel's reach. It needs nothing of the hair mesh but that it is drawn, so blended
+  shells and alpha-tested cards alike (§4, "Hair edges": a per-mesh rule failed).
 
 | Constant | Value | Tag and basis |
 |---|---|---|
@@ -4465,6 +4473,8 @@ Community Shaders code was read or used (the clean-room rule of #1503).
 | skin ambient occlusion (ssao_lighting.wesl `nvf_skin_ambient_occlusion`) | v^(0.7, 0.9, 1.05), floor (0.15, 0.08, 0.05) (tuned 2026-11-26 from the notes' 0.42-1.15 and 0.38-0.12: red eyelid rims); relaxed by 0.55 under linear luma 0.04-0.18 | [hypothesis] after Jimenez et al. 2016 |
 | sun contact shadow on skin | a quarter | [hypothesis] |
 | `NVF_SKIN_PRE_SCATTER` (sss.wesl) | 0.25 | [hypothesis] within Jimenez et al. 2015's range |
+| hairline shade (sss_screen.wesl): reach, depth window, darkening | 6 mm; 10 mm behind to 40 mm in front; (0.30, 0.36, 0.40) at full cover | [hypothesis] |
+| strand noise (nif_material.wesl `SKIN_STRAND_U`, `_V`) | 400, 60 per texture unit | [hypothesis] about 1.5 by 10 mm; the head texture's v taken as up the forehead |
 | tap slope floor (sss_screen.wesl `tilt`) | 0.35 | [hypothesis] |
 | `EYE_IRIS_CENTRE`, `EYE_IRIS_RADIUS` (nif_material.wesl) | (0.50, 0.44), 0.19 | [observed: `eyelefthuman.nif`, `eyeblue.dds`, `eyedarkbrown.dds`] |
 | `EYE_IRIS_DEPTH` | 0.17 units | [hypothesis] about 2.5 mm, the human anterior chamber |

@@ -16,6 +16,7 @@ const IMPORT_TEXT: &str = "// NVForever subsurface scattering (nvforever sss.rs)
 @if(NVF_SKIN_SSS && NVF_SKIN_SPLIT) import nvforever::sss::nvf_skin_last_diffuse;
 @if(NVF_SKIN_SSS && ENVIRONMENT_MAP) import nvforever::sss::nvf_skin_sky;
 @if(NVF_SKIN_SSS && NVF_SKIN_SPLIT) import nvforever::sss::nvf_skin_post_scatter;
+@if(NVF_HAIR && NVF_SKIN_ALBEDO && DEPTH_PREPASS) import nvforever::sss::nvf_hair_mark;
 @if(NVF_HAIR) import nvforever::sss::{nvf_sss_point_hair, nvf_sss_spot_hair, nvf_sss_directional_hair};
 @if(NVF_OUTFIT) import nvforever::sss::{nvf_sss_point_outfit, nvf_sss_spot_outfit, nvf_sss_directional_outfit};
 @if(NVF_OUTFIT && ENVIRONMENT_MAP) import nvforever::sss::nvf_outfit_sheen_sky;
@@ -106,9 +107,12 @@ const SKIN_MARK_TEXT: &str = "    @if(NVF_SKIN_SSS && NVF_SKIN_SPLIT)
     // pass multiplies back in, while the exact HDR RGB specular goes to binding 48
     // (sss.wesl `nvf_skin_post_scatter`).
     @if(NVF_SKIN_SSS && NVF_SKIN_SPLIT)
-    let nvf_skin_post = nvf_skin_post_scatter(in.frag_coord, diffuse_color, nvf_skin_spec_hdr);
+    let nvf_skin_post = nvf_skin_post_scatter(in.frag_coord, diffuse_color, in.material.ior, nvf_skin_spec_hdr);
     @if(NVF_SKIN_SSS && NVF_SKIN_SPLIT)
     output_color = vec4(max(output_color.rgb - nvf_skin_spec_hdr, vec3(0.0)) / nvf_skin_post, -1.0);
+    // Hair marks its pixels for the hairline's shade on the skin beside it (sss.wesl).
+    @if(NVF_HAIR && NVF_SKIN_ALBEDO && DEPTH_PREPASS)
+    nvf_hair_mark(in.frag_coord);
 ";
 
 const POINT_ANCHOR: &str = "        let light_contrib = lighting::point_light(light_id, &lighting_input, enable_diffuse, true);\n";
