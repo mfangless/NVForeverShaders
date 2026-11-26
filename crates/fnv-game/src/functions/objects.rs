@@ -50,9 +50,11 @@ impl Game<'_> {
         if self.base_script(base).is_some() || self.base_script(original).is_some() {
             return Err("placing a temporary scene base with an attached script is not supported yet".into());
         }
-        // Match the existing getter's clone-local then inherited session override.
+        // Pre-clone original `MODL/` overrides are snapshotted onto `base` at
+        // `TempCloneForm` creation (`Game::snapshot_model_path`), so read only `base`'s
+        // own `MODL/` entry and never live-inherit post-clone original edits.
         // Preserve explicit empty as distinct from absent authored metadata.
-        let model_override = match self.field_overrides.get(&(base, "MODL/".into())).or_else(|| self.field_overrides.get(&(original, "MODL/".into()))) {
+        let model_override = match self.field_overrides.get(&(base, "MODL/".into())) {
             Some(fnv_script::vm::XVal::Str(path)) => Some(path.clone()),
             _ => None,
         };
@@ -100,7 +102,7 @@ pub fn place_at_me(g: &mut Game, ctx: &Ctx, a: &Args) -> Result<Value, String> {
         let r = g.place_scene_base(base, cell, pos, rot, each)?;
         note_created(g, r);
         if explodes {
-            g.combat_requests.push(crate::combat::CombatRequest::Explode { explosion: base, at: pos });
+            g.combat_requests.push(crate::combat::CombatRequest::Explode { explosion: base, at: pos, source: Some(at) });
         }
         last = Some(r);
     }

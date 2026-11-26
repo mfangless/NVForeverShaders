@@ -229,7 +229,8 @@ fn explosion_trait_form_and_flag_overrides_readback_and_validation() {
     assert_eq!(after.enchantment, Some(FormId(ENCH_B)));
     assert_eq!(after.image_space_modifier, Some(FormId(IMAD_B)));
 
-    // Wrong-type target forms and non-EXPL forms are ignored without mutating either form.
+    // Wrong-type target forms on typed EXPL slots clear those slots to 0/None
+    // [observed: jip_24_expl_trait_form_type_check], while non-EXPL forms remain untouched.
     q(
         &mut g,
         r#"
@@ -242,28 +243,67 @@ fn explosion_trait_form_and_flag_overrides_readback_and_validation() {
         SetExplosionFlag OwnedGuardWeap 2 1
         "#,
     );
-    assert_eq!(g.explosion_traits(FormId(EXPL_A)).unwrap().light, Some(FormId(LIGH_B)));
-    assert_eq!(g.explosion_traits(FormId(EXPL_A)).unwrap().sound_1, Some(FormId(SOUN_B)));
-    assert_eq!(g.explosion_traits(FormId(EXPL_A)).unwrap().impact_dataset, Some(FormId(IPDS_B)));
-    assert_eq!(g.explosion_traits(FormId(EXPL_A)).unwrap().enchantment, Some(FormId(ENCH_B)));
-    assert_eq!(g.explosion_traits(FormId(EXPL_A)).unwrap().image_space_modifier, Some(FormId(IMAD_B)));
+    assert_eq!(g.explosion_traits(FormId(EXPL_A)).unwrap().light, None, "wrong-type clears slot 0");
+    assert_eq!(g.explosion_traits(FormId(EXPL_A)).unwrap().sound_1, None, "wrong-type clears slot 1");
+    assert_eq!(g.explosion_traits(FormId(EXPL_A)).unwrap().impact_dataset, None, "wrong-type clears slot 3");
+    assert_eq!(g.explosion_traits(FormId(EXPL_A)).unwrap().enchantment, None, "wrong-type clears slot 5");
+    assert_eq!(g.explosion_traits(FormId(EXPL_A)).unwrap().image_space_modifier, None, "wrong-type clears slot 6");
     assert_eq!(n(&mut g, "GetObjectEffect OwnedGuardWeap"), f64::from(ENCH_A), "unrelated WEAP EITM untouched");
 
-    // Clearing form traits with 0 or omitted third argument resets them to None/0.
+    // Slot 4 (INAM) accepts any non-null form without type checking
+    // [observed: jip_24_expl_trait_form_type_check, w4d_27_expl_inam_placeable].
     q(
         &mut g,
         r#"
+        SetExplosionTraitForm OwnedBlastExpl 0 BlastLightB
+        SetExplosionTraitForm OwnedBlastExpl 4 BlastEnchA
+        SetExplosionTraitForm OwnedBlastExpl 5 BlastEnchB
+        SetExplosionTraitForm OwnedBlastExpl 6 BlastImadB
+        "#,
+    );
+    assert_eq!(n(&mut g, "GetExplosionTraitForm OwnedBlastExpl 4"), f64::from(ENCH_A));
+    assert_eq!(g.explosion_traits(FormId(EXPL_A)).unwrap().placed_impact, Some(FormId(ENCH_A)));
+
+    // Passing an explicit null ref variable or 0 is a no-op across all slots (0, 4, 5, 6)
+    // [observed: w4h_02_explosion_slot4_reconcile, w4d_27_expl_inam_placeable].
+    q(
+        &mut g,
+        r#"
+        ref rNull
+        let rNull := 0
+        SetExplosionTraitForm OwnedBlastExpl 0 rNull
+        SetExplosionTraitForm OwnedBlastExpl 4 rNull
+        SetExplosionTraitForm OwnedBlastExpl 5 rNull
+        SetExplosionTraitForm OwnedBlastExpl 6 rNull
         SetExplosionTraitForm OwnedBlastExpl 0 0
-        SetExplosionTraitForm OwnedBlastExpl 4
+        SetExplosionTraitForm OwnedBlastExpl 4 0
         SetExplosionTraitForm OwnedBlastExpl 5 0
+        SetExplosionTraitForm OwnedBlastExpl 6 0
+        "#,
+    );
+    assert_eq!(n(&mut g, "GetExplosionTraitForm OwnedBlastExpl 0"), f64::from(LIGH_B), "explicit null/0 must not clear slot 0");
+    assert_eq!(n(&mut g, "GetExplosionTraitForm OwnedBlastExpl 4"), f64::from(ENCH_A), "explicit null/0 must not clear slot 4");
+    assert_eq!(n(&mut g, "GetExplosionTraitForm OwnedBlastExpl 5"), f64::from(ENCH_B), "explicit null/0 must not clear slot 5");
+    assert_eq!(n(&mut g, "GetExplosionTraitForm OwnedBlastExpl 6"), f64::from(IMAD_B), "explicit null/0 must not clear slot 6");
+
+    // Omitting the 3rd argument clears every slot (including slot 4) to 0/None
+    // [observed: gaps7, w4h_02_explosion_slot4_reconcile].
+    q(
+        &mut g,
+        r#"
+        SetExplosionTraitForm OwnedBlastExpl 0
+        SetExplosionTraitForm OwnedBlastExpl 4
+        SetExplosionTraitForm OwnedBlastExpl 5
+        SetExplosionTraitForm OwnedBlastExpl 6
         "#,
     );
     assert_eq!(n(&mut g, "GetExplosionTraitForm OwnedBlastExpl 0"), 0.0);
     assert_eq!(n(&mut g, "GetExplosionTraitForm OwnedBlastExpl 4"), 0.0);
     assert_eq!(n(&mut g, "GetExplosionTraitForm OwnedBlastExpl 5"), 0.0);
+    assert_eq!(n(&mut g, "GetExplosionTraitForm OwnedBlastExpl 6"), 0.0);
     assert_eq!(n(&mut g, "GetObjectEffect OwnedBlastExpl"), 0.0);
     let cleared = g.explosion_traits(FormId(EXPL_A)).unwrap();
-    assert_eq!((cleared.light, cleared.placed_impact, cleared.enchantment), (None, None, None));
+    assert_eq!((cleared.light, cleared.placed_impact, cleared.enchantment, cleared.image_space_modifier), (None, None, None, None));
 
     // SetExplosionFlag across documented flags 1..=6, preserving bit 0 (Radius in BS Units).
     q(
@@ -391,7 +431,10 @@ fn live_explosion_overrides_reach_effect_pickpocket_radiation_placement_and_hit_
     assert_eq!(n(&mut g, "BlastTargetRef.HasMagicEffect BlastDrainAgility"), 1.0, "live EITM swap applied BlastEnchB");
 
     q(&mut g, "SetExplosionTraitForm OwnedBlastExpl 5 0");
-    assert!(g.apply_explosion_effect(FormId(EXPL_A), FormId(TARGET_REF), Some(FormId::PLAYER_REF)).is_empty(), "clearing EITM applies no effect");
+    assert_eq!(g.explosion_traits(FormId(EXPL_A)).unwrap().enchantment, Some(FormId(ENCH_B)), "explicit 0 does not clear EITM");
+
+    q(&mut g, "SetExplosionTraitForm OwnedBlastExpl 5");
+    assert!(g.apply_explosion_effect(FormId(EXPL_A), FormId(TARGET_REF), Some(FormId::PLAYER_REF)).is_empty(), "omitting 3rd arg clears EITM and applies no effect");
 
     // 2. Live damage + EITM overrides reach Game::explosive_from_explosion -> explosive_harms.
     q(&mut g, "SetExplosionTraitNumeric OwnedBlastExpl 1 0");
@@ -437,8 +480,69 @@ fn live_explosion_overrides_reach_effect_pickpocket_radiation_placement_and_hit_
     assert_eq!(got_radius, XVal::Num(777.0));
     assert_eq!(g.explosion_hit_damage(FormId(clone), FormId(TARGET_REF)), Some(135.0));
 
-    // 5. PlaceAtMe of an authored EXPL emits CombatRequest::Explode resolving live overrides.
+    // 5. PlaceAtMe of an authored EXPL emits CombatRequest::Explode resolving live overrides and caller source.
     g.combat_requests.clear();
     q(&mut g, "player.PlaceAtMe OwnedBlastExpl 1");
-    assert!(matches!(g.combat_requests.as_slice(), [CombatRequest::Explode { explosion, .. }] if *explosion == FormId(EXPL_A)));
+    assert!(matches!(
+        g.combat_requests.as_slice(),
+        [CombatRequest::Explode { explosion, source, .. }]
+            if *explosion == FormId(EXPL_A) && *source == Some(FormId::PLAYER_REF)
+    ));
+}
+
+#[test]
+fn unhandled_explosion_hit_damage_does_not_spawn_explosion_ref() {
+    let f = fixture();
+    let mut g = game(&f);
+
+    let before = g.explosion_placed(FormId(EXPL_A), None, [0.0; 3], 400.0).expect("baseline ref");
+    assert_eq!(g.explosion_hit_damage(FormId(EXPL_A), FormId(TARGET_REF)), Some(80.0));
+    let after = g.explosion_placed(FormId(EXPL_A), None, [0.0; 3], 400.0).expect("next ref");
+    assert_eq!(after.0, before.0 + 1, "unhandled explosion_hit_damage must not allocate a live explosion ref");
+}
+
+#[test]
+fn showoff_on_explosion_hit_passes_explosion_ref_as_self_and_source_actor() {
+    let f = fixture();
+    let mut g = game(&f);
+
+    let expl_ref = g
+        .explosion_placed(FormId(EXPL_A), Some(FormId::PLAYER_REF), [0.0; 3], 400.0)
+        .expect("placed live explosion reference");
+
+    q(
+        &mut g,
+        r#"
+        SetEventHandler "ShowOff:OnExplosionHit" (Begin Function { ref rHit, ref rSrc }
+            ref rSelf
+            ref rBase
+            let rSelf := GetSelfAlt
+            let rBase := rSelf.GetBaseObject
+            Player.AuxVarSetRef "*eh_self" rSelf
+            Player.AuxVarSetRef "*eh_base" rBase
+            Player.AuxVarSetRef "*eh_hit" rHit
+            Player.AuxVarSetRef "*eh_src" rSrc
+            Player.AuxVarSetFlt "*eh_src_zero" (rSrc == 0)
+            Player.AuxVarSetFlt "*eh_base_dmg" (GetExplosionTraitNumeric rBase 1)
+            Player.AuxVarSetFlt "*eh_in_dmg" (GetExplosionHitDamage)
+            SetExplosionHitDamage 42.5
+        End)
+        "#,
+    );
+
+    let out = g.explosion_hit_with_context(Some(expl_ref), FormId(TARGET_REF), Some(FormId::PLAYER_REF), 100.0);
+    assert_eq!(out, 42.5);
+    assert_eq!(q(&mut g, "SetFunctionValue (Player.AuxVarGetRef \"*eh_self\")"), XVal::Ref(expl_ref.0));
+    assert_eq!(q(&mut g, "SetFunctionValue (Player.AuxVarGetRef \"*eh_base\")"), XVal::Ref(EXPL_A));
+    assert_eq!(q(&mut g, "SetFunctionValue (Player.AuxVarGetRef \"*eh_hit\")"), XVal::Ref(TARGET_REF));
+    assert_eq!(q(&mut g, "SetFunctionValue (Player.AuxVarGetRef \"*eh_src\")"), XVal::Ref(FormId::PLAYER_REF.0));
+    assert_eq!(q(&mut g, "SetFunctionValue (Player.AuxVarGetFlt \"*eh_src_zero\")"), XVal::Num(0.0));
+    assert_eq!(q(&mut g, "SetFunctionValue (Player.AuxVarGetFlt \"*eh_base_dmg\")"), XVal::Num(80.0));
+    assert_eq!(q(&mut g, "SetFunctionValue (Player.AuxVarGetFlt \"*eh_in_dmg\")"), XVal::Num(100.0));
+
+    // When no source actor is provided, arg2 is null ref (0) and GetSelfAlt stays the explosion ref.
+    let out2 = g.explosion_hit_with_context(Some(expl_ref), FormId(TARGET_REF), None, 60.0);
+    assert_eq!(out2, 42.5);
+    assert_eq!(q(&mut g, "SetFunctionValue (Player.AuxVarGetRef \"*eh_self\")"), XVal::Ref(expl_ref.0));
+    assert_eq!(q(&mut g, "SetFunctionValue (Player.AuxVarGetFlt \"*eh_src_zero\")"), XVal::Num(1.0));
 }

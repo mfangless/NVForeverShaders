@@ -320,7 +320,7 @@ fn calculated_equipped_weight_honors_weightless_tweaks_and_perks() {
     use fnv_sim::inventory::{WeightRules, WEIGHTLESS_ARMOR, WEIGHTLESS_WEAPONS};
     let f = fixture();
     let mut g = game(&f);
-    assert_eq!(n(&mut g, "GetPluginVersion \"lStewieAl's Tweaks\""), 945.0);
+    assert_eq!(n(&mut g, "GetPluginVersion \"lStewieAl's Tweaks\""), 960.0);
 
     // Equip gun (6.0), power armor (20.0), and hat (1.0).
     let inv = g.world.inventory_mut(FormId::PLAYER_REF).unwrap();
@@ -370,7 +370,7 @@ fn calculated_equipped_weight_honors_weightless_tweaks_and_perks() {
 fn weapon_flag_overrides_sync_getters_playability_and_equipment() {
     let f = fixture();
     let mut g = game(&f);
-    assert_eq!(n(&mut g, "GetPluginVersion \"lStewieAl's Tweaks\""), 945.0);
+    assert_eq!(n(&mut g, "GetPluginVersion \"lStewieAl's Tweaks\""), 960.0);
     dressed(&mut g);
 
     let gun = FormId(GUN);
@@ -443,4 +443,68 @@ fn weapon_flag_overrides_sync_getters_playability_and_equipment() {
     assert_eq!(g.weapon_flags1_override(FormId(HAT)), None);
     assert_eq!(g.weapon_flags1(FormId(HAT)), None);
     assert_eq!(g.num_field(FormId(HAT), "DNAM", "flags1"), 0.0);
+}
+
+#[test]
+fn aux_timer_stop_handler_defers_to_next_frame_and_passes_null_self() {
+    let f = fixture();
+    let mut g = game(&f);
+    // Register Stop and Start handlers and trigger same-frame: neither should fire yet.
+    q(
+        &mut g,
+        r#"ref cbStop
+ref cbStart
+let cbStop := (Begin Function {string_var nm, ref owner}
+  player.AuxVarSetFlt "*stop_n" ((player.AuxVarGetFlt "*stop_n") + 1)
+  if eval (GetSelfAlt == 0) && (owner == player)
+    player.AuxVarSetFlt "*stop_ok" ((player.AuxVarGetFlt "*stop_ok") + 1)
+  endif
+End)
+let cbStart := (Begin Function {string_var nm, ref owner}
+  player.AuxVarSetFlt "*start_n" ((player.AuxVarGetFlt "*start_n") + 1)
+  if eval (GetSelfAlt == 0) && (owner == player)
+    player.AuxVarSetFlt "*start_ok" ((player.AuxVarGetFlt "*start_ok") + 1)
+  endif
+End)
+player.AuxVarSetRef "*cb_stop" cbStop
+player.AuxVarSetRef "*cb_start" cbStart
+SetOnAuxTimerStopHandler 1 cbStop "*w6t" player
+SetOnAuxTimerStartHandler 1 cbStart "*w6t" player
+AuxTimerStart "*w6t" 10 0 player
+AuxTimerStop "*w6t" 1 player"#,
+    );
+    assert_eq!(n(&mut g, "player.AuxVarGetFlt \"*stop_n\""), 0.0, "stop handler must defer to next frame");
+    assert_eq!(n(&mut g, "player.AuxVarGetFlt \"*start_n\""), 0.0, "start handler must defer to next frame");
+
+    // Next frame: both handlers are now active; AuxTimerStart & AuxTimerStop 1 fire with GetSelfAlt == 0.
+    g.tick();
+    q(
+        &mut g,
+        r#"AuxTimerStart "*w6t" 10 0 player
+AuxTimerStop "*w6t" 0 player
+AuxTimerStart "*w6t" 10 0 player
+AuxTimerStop "*w6t" 1 player"#,
+    );
+    assert_eq!(n(&mut g, "player.AuxVarGetFlt \"*stop_n\""), 1.0);
+    assert_eq!(n(&mut g, "player.AuxVarGetFlt \"*stop_ok\""), 1.0);
+    assert_eq!(n(&mut g, "player.AuxVarGetFlt \"*start_n\""), 2.0);
+    assert_eq!(n(&mut g, "player.AuxVarGetFlt \"*start_ok\""), 2.0);
+
+    // Same-frame removal still lets stop fire in this frame, then stops firing after next tick.
+    q(
+        &mut g,
+        r#"ref cbStop
+let cbStop := player.AuxVarGetRef "*cb_stop"
+SetOnAuxTimerStopHandler 0 cbStop "*w6t" player
+AuxTimerStart "*w6t" 10 0 player
+AuxTimerStop "*w6t" 1 player"#,
+    );
+    assert_eq!(n(&mut g, "player.AuxVarGetFlt \"*stop_n\""), 2.0, "removal takes effect next frame");
+    g.tick();
+    q(
+        &mut g,
+        r#"AuxTimerStart "*w6t" 10 0 player
+AuxTimerStop "*w6t" 1 player"#,
+    );
+    assert_eq!(n(&mut g, "player.AuxVarGetFlt \"*stop_n\""), 2.0, "removed stop handler silent after tick");
 }

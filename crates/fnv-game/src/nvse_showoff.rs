@@ -20,6 +20,19 @@ pub const ON_POV_CHANGE: &str = "showoff:onpovchange";
 pub const ON_COMPLETE_OBJECTIVE: &str = "showoff:oncompleteobjective";
 pub const ON_DISPLAY_OBJECTIVE: &str = "showoff:ondisplayobjective";
 pub const ON_WEAPON_UNHOLSTER: &str = "showoff:onweaponunholster";
+pub const ON_FIRE_WEAPON: &str = "showoff:onfireweapon";
+
+/// Safety cap on unconsumed `ForceWeaponJamAnim` requests in headless runs where no engine
+/// drains `ShowOffState::force_jam_requests` [design].
+pub const MAX_FORCE_JAM_REQUESTS: usize = 64;
+
+/// Which ShowOff aux timer handler list a deferred registration/removal targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuxTimerHandlerKind {
+    Start,
+    Stop,
+    Update,
+}
 
 #[derive(Debug, Default)]
 pub struct ShowOffState {
@@ -37,10 +50,10 @@ pub struct ShowOffState {
     /// `timer_stops` (`nvse_showoff3`).
     pub timer_starts: Vec<(XVal, String, FormId)>,
     pub timer_updates: Vec<(XVal, String, FormId)>,
-    /// Start and update handlers set or removed this frame, applied at the next frame's
-    /// aux timer update: (start, set, the function, the name lower case, the owner)
-    /// (`nvse_showoff3`).
-    pub pending_handlers: Vec<(bool, bool, XVal, String, FormId)>,
+    /// Start, stop, and update handlers set or removed this frame, applied at the next
+    /// frame's aux timer update: (kind, set, the function, the name lower case, the owner)
+    /// (`nvse_showoff`, `nvse_showoff3`).
+    pub pending_handlers: Vec<(AuxTimerHandlerKind, bool, XVal, String, FormId)>,
     /// Each running aux timer's countdown and flags as AuxTimerStart gave them, by owner
     /// and name lower case (AuxTimerTimeToCountdown; the update flag 256).
     pub countdowns: std::collections::HashMap<(FormId, String), (f64, u32)>,
@@ -79,6 +92,16 @@ pub struct ShowOffState {
     /// before `weapon_out` became `true` so same-frame completion still deduplicates
     /// while a later-frame cancelled draw clears cleanly [design].
     pub unholster_pending: std::collections::HashMap<FormId, Option<u64>>,
+    /// `(frame, [(actor, weapon)])` already dispatched to `ShowOff:OnFireWeapon` this
+    /// frame, deduplicating `weapon_fired` -> `projectile_fired` and multi-pellet bursts
+    /// [observed: Fallout: New Vegas 1.4.0.525, xNVSE 6.4.9, ShowOffNVSE Plugin 184,
+    /// 2026-11-23, GSDocMitchellHouse (0x00103DF9), 10 official base masters, probe
+    /// `w1_3632_onfireweapon_and_forcejam` in #3679 (`Player.FireWeapon` on 7-pellet
+    /// Caravan Shotgun `0x000CD53A` invokes callback once)].
+    pub fired_this_frame: (u64, Vec<(FormId, FormId)>),
+    /// Actors asked by `ForceWeaponJamAnim` / `ForceJamAnim` to play their weapon's jam
+    /// animation (`Game::take_force_jam_requests`, consumed by `nvf_play::combat::fire`).
+    pub force_jam_requests: Vec<FormId>,
 }
 
 fn num(args: &[XVal], k: usize, dflt: f64) -> f64 {
@@ -90,41 +113,75 @@ fn num(args: &[XVal], k: usize, dflt: f64) -> f64 {
 
 impl Game<'_> {
     /// ShowOff:OnAdd, after an item reached a container: the handlers get the item's base
-    /// and the container, and GetAddedItemRefShowOff gives an inventory reference to it
-    /// [observed: showoff1, a stimpak AddItem'd to the player: a reference whose base is
-    /// type 47; the two-argument handler got the base (47) and the player; a handler
-    /// taking no arguments runs too].
-    pub(crate) fn showoff_on_add(&mut self, to: FormId, item: FormId) {
+    /// and the container, with the picked-up world reference (or null for `AddItem` /
+    /// inventory transfers) as the calling reference (`GetSelfAlt` / `ThisAlt`), and
+    /// `GetAddedItemRefShowOff` gives that world reference or an inventory reference
+    /// [documented: GECK wiki ShowOff:OnAdd; observed: showoff1, a stimpak AddItem'd to
+    /// the player: a reference whose base is type 47; the two-argument handler got the
+    /// base (47) and the player; a handler taking no arguments runs too].
+    pub(crate) fn showoff_on_add(&mut self, to: FormId, item: FormId, world_ref: Option<FormId>) {
         if !self.handled(ON_ADD) {
             return;
         }
-        let r = self.temp_ref(to, item);
+        let r = world_ref.unwrap_or_else(|| self.temp_ref(to, item));
         let before = self.showoff.added.replace(r);
-        self.dispatch_event("ShowOff:OnAdd", vec![XVal::Ref(item.0), XVal::Ref(to.0)], Some(to));
+        self.dispatch_event("ShowOff:OnAdd", vec![XVal::Ref(item.0), XVal::Ref(to.0)], world_ref);
         self.showoff.added = before;
     }
 
-    /// ShowOff:OnExplosionHit, before a blast's damage reaches an actor: the handlers get
-    /// the actor and none, read the damage (GetExplosionHitDamage) and may change it
-    /// (SetExplosionHitDamage). Returns the damage to deal [observed: showoff1, a
-    /// MineFragExplosion at the player read 100, and set to 5 the player lost 5 Health;
-    /// hypothesis: the damage is the blast's before armour, as the engine's `b.damage`].
-    pub fn explosion_hit(&mut self, target: FormId, damage: f64) -> f64 {
+    /// ShowOff:OnExplosionHit, before a blast's damage reaches an actor: calling
+    /// reference (`GetSelfAlt`) is the live `EXPL` reference (whose `GetBaseObject` is
+    /// the `EXPL` form), argument 1 is the hit actor, and argument 2 is the source actor
+    /// (or `0` when none [observed: showoff1]). Handlers read the damage
+    /// (`GetExplosionHitDamage`) and may change it (`SetExplosionHitDamage`). Returns the
+    /// damage to deal [observed: showoff1, MineFragExplosion at the player read 100 and
+    /// set to 5 the player lost 5 Health, and argument 2 read 0; observed 2026-11-24:
+    /// Fallout: New Vegas 1.4.0.525 + xNVSE 6.4.9 + ShowOffNVSE 184 + JIP LN 57.30, 10
+    /// official base masters, GSDocMitchellHouse (`0x00103DF9`), isolated clean-room
+    /// staging copy, committed probe `w6t2_01_showoff_on_explosion_hit`
+    /// (`tools/capture/nvse/catalogs/wave6c_showoff_on_explosion_hit.json`):
+    /// `PROBE|w6t2_01_showoff_on_explosion_hit|reg=1,n=1,selfIsP=0,tSelf=81,tBase=81,base=0007078B,hitIsP=1,src=00000014,dmg=100.0`;
+    /// no DLL or source consulted; hypothesis: the damage is the blast's before armour,
+    /// as the engine's `b.damage`].
+    pub fn explosion_hit_with_context(
+        &mut self,
+        explosion_ref: Option<FormId>,
+        target: FormId,
+        source: Option<FormId>,
+        damage: f64,
+    ) -> f64 {
         if !self.handled(ON_EXPLOSION_HIT) {
             return damage;
         }
         let before = self.showoff.explosion_damage.replace(damage);
-        self.dispatch_event("ShowOff:OnExplosionHit", vec![XVal::Ref(target.0), XVal::Ref(0)], Some(target));
+        self.dispatch_event(
+            "ShowOff:OnExplosionHit",
+            vec![XVal::Ref(target.0), XVal::Ref(source.map_or(0, |s| s.0))],
+            explosion_ref,
+        );
         let out = self.showoff.explosion_damage.unwrap_or(damage);
         self.showoff.explosion_damage = before;
         out
     }
 
+    /// Convenience wrapper for [`Game::explosion_hit_with_context`] when no live
+    /// explosion reference or source actor is supplied.
+    pub fn explosion_hit(&mut self, target: FormId, damage: f64) -> f64 {
+        self.explosion_hit_with_context(None, target, None, damage)
+    }
+
     /// Resolve an `EXPL` form's live damage (`Game::explosion_traits`, including
-    /// `SetExplosionTraitNumeric` trait 1) and run `ShowOff:OnExplosionHit` on `target`.
+    /// `SetExplosionTraitNumeric` trait 1) and run `ShowOff:OnExplosionHit` on `target`
+    /// with a placed live explosion reference as calling reference.
     pub fn explosion_hit_damage(&mut self, explosion: FormId, target: FormId) -> Option<f64> {
-        let damage = f64::from(self.explosion_traits(explosion)?.damage);
-        Some(self.explosion_hit(target, damage))
+        let traits = self.explosion_traits(explosion)?;
+        let damage = f64::from(traits.damage);
+        if !self.handled(ON_EXPLOSION_HIT) {
+            return Some(damage);
+        }
+        let at = self.ref_pos_rot(target).map_or([0.0; 3], |(p, _)| p);
+        let expl_ref = self.explosion_placed(explosion, None, at, traits.radius);
+        Some(self.explosion_hit_with_context(expl_ref, target, None, damage))
     }
 
     /// Whether any `ShowOff:OnPreActivateInventoryItem` or
@@ -255,8 +312,9 @@ impl Game<'_> {
     }
 
     /// `ShowOff:OnPOVChange`, fired when the player's camera perspective transitions
-    /// between first-person (`1`) and third-person (`0`) [documented: GECK wiki
-    /// ShowOff:OnPOVChange].
+    /// between first-person (`1`) and third-person (`0`), with calling reference
+    /// `Player` (`0x14`) [documented: GECK wiki ShowOff:OnPOVChange; observed 2026-11-24:
+    /// `w6t2p2_03_showoff_on_pov_change_toggle`: `s0=0,sP=1`].
     pub(crate) fn showoff_on_pov_change(&mut self, first_person: bool) {
         if !self.handled(ON_POV_CHANGE) {
             return;
@@ -264,7 +322,7 @@ impl Game<'_> {
         self.dispatch_event(
             "ShowOff:OnPOVChange",
             vec![XVal::Num(if first_person { 1.0 } else { 0.0 })],
-            None,
+            Some(FormId::PLAYER_REF),
         );
     }
 
@@ -353,15 +411,73 @@ impl Game<'_> {
         self.dispatch_event("ShowOff:OnWeaponUnholster", vec![XVal::Ref(weapon.0)], Some(actor));
     }
 
+    /// `ShowOff:OnFireWeapon`: fired when an actor fires a ranged weapon. Calling
+    /// reference (`0::`) is `actor`; first argument (`1::` / `"first"::`) is `weapon`
+    /// base form, firing once per shot even on multi-pellet weapons [documented: GECK
+    /// wiki Category:Event Handlers (ShowOff NVSE), SetEventHandlerAlt; observed:
+    /// Fallout: New Vegas 1.4.0.525, xNVSE 6.4.9, ShowOffNVSE Plugin 184, 2026-11-23,
+    /// GSDocMitchellHouse (0x00103DF9), 10 official base masters, probe
+    /// `w1_3632_onfireweapon_and_forcejam` in #3679 (`SetEventHandlerAlt
+    /// "ShowOff:OnFireWeapon"` with `begin Function { ref rWeap }`, `Player.FireWeapon`
+    /// with `Weap10mmPistol` `0x0000434F` and 7-pellet Caravan Shotgun `0x000CD53A` ->
+    /// `self=0x14`, `weap=WEAP base`, 7-pellet shotgun fires once); hypothesis: NPC-actor
+    /// dispatch, non-actor and melee animation types 0..=2 exclusion, and god-mode
+    /// firing]. Free when no handler is registered.
+    pub(crate) fn showoff_on_fire_weapon(&mut self, actor: FormId, weapon: FormId, dedup_same_frame: bool) -> usize {
+        if !self.handled(ON_FIRE_WEAPON) || weapon.0 == 0 {
+            return 0;
+        }
+        let is_actor = actor == FormId::PLAYER_REF
+            || matches!(
+                crate::functions::base_of(self, actor).and_then(|b| self.data.sig(b)).as_ref(),
+                Some(b"NPC_") | Some(b"CREA")
+            );
+        if !is_actor {
+            return 0;
+        }
+        if matches!(self.data.weapon_anim_types.get(&self.unclone(weapon)), Some(0..=2)) {
+            return 0;
+        }
+        if self.showoff.fired_this_frame.0 != self.frame {
+            self.showoff.fired_this_frame = (self.frame, Vec::new());
+        }
+        let key = (actor, weapon);
+        if dedup_same_frame && self.showoff.fired_this_frame.1.contains(&key) {
+            return 0;
+        }
+        if !self.showoff.fired_this_frame.1.contains(&key) {
+            self.showoff.fired_this_frame.1.push(key);
+        }
+        self.dispatch_event("ShowOff:OnFireWeapon", vec![XVal::Ref(weapon.0)], Some(actor))
+    }
+
+    /// Take queued `ForceWeaponJamAnim` / `ForceJamAnim` actor requests for the engine's
+    /// combat playback (`nvf_play::combat::fire`).
+    pub fn take_force_jam_requests(&mut self) -> Vec<FormId> {
+        std::mem::take(&mut self.showoff.force_jam_requests)
+    }
+
+    /// Whether `actor` has a queued `ForceWeaponJamAnim` / `ForceJamAnim` request not yet
+    /// consumed by `nvf_play::combat::fire`, so post-script animation sync preserves
+    /// `AnimAction::Jam` without clobbering it back to `None`/`Reload` and double-firing
+    /// `SetOnReloadWeaponEventHandler`.
+    pub fn has_pending_force_jam(&self, actor: FormId) -> bool {
+        self.showoff.force_jam_requests.contains(&actor)
+    }
+
     /// The stop handlers of an aux timer that ran out or was stopped with its event: each
-    /// gets the timer's name and its owner [documented: SetOnAuxTimerStopHandler; observed:
-    /// showoff1, once when a 0.1 s timer ran out and once on AuxTimerStop 1, the owner the
-    /// player].
+    /// gets the timer's name and its owner with null calling reference (`GetSelfAlt == 0`)
+    /// [documented: SetOnAuxTimerStopHandler; observed: 2026-11-24, Fallout: New Vegas
+    /// 1.4.0.525, xNVSE 6.4.9, ShowOffNVSE 184, GSDocMitchellHouse (0x00103DF9),
+    /// 10 official base masters,
+    /// `tools/capture/nvse/catalogs/wave6d1_aux_timer_stop_deferred_and_self.json` probe
+    /// `w6d1p3_27_aux_timer_stop`: `same=0,noev=0,next=1,remSame=1|nm=[sNm],ownP=1,s0=1,sP=0`;
+    /// no DLL, PDB, or third-party source consulted].
     pub(crate) fn aux_timer_stopped(&mut self, owner: FormId, name: &str) {
         let hs: Vec<XVal> = self.showoff.timer_stops.iter().filter(|(_, n, o)| n == name && *o == owner).map(|(f, _, _)| f.clone()).collect();
         for f in hs {
-            let ctx = RunCtx { self_ref: Some(owner), ..RunCtx::default() };
-            if let Err(error) = self.run_function(&f, Some(fnv_script::vm::Value::Ref(owner.0)), vec![XVal::Str(name.to_string()), XVal::Ref(owner.0)], None, ctx) {
+            let ctx = RunCtx::default();
+            if let Err(error) = self.run_function(&f, None, vec![XVal::Str(name.to_string()), XVal::Ref(owner.0)], None, ctx) {
                 self.emit(crate::trace::EventKind::ScriptError { unit: "aux timer stop handler".into(), error });
             }
         }
@@ -395,22 +511,64 @@ pub(crate) fn call(g: &mut Game, name: &str, subject: Option<FormId>, args: &[XV
                 Some(XVal::Ref(r)) if *r != 0 => FormId(*r),
                 _ => subject.filter(|_| args.len() < 4).unwrap_or(FormId::PLAYER_REF),
             };
-            g.showoff.timer_stops.retain(|(h, n, o)| !(*h == f && *n == timer && *o == owner));
-            if set {
-                g.showoff.timer_stops.push((f, timer, owner));
-            }
+            // Applied at the next frame (`Game::aux_timer_updates`), matching Start/Update
+            // [observed: `w6d1p3_27_aux_timer_stop`, `same=0,noev=0,next=1,remSame=1`].
+            g.showoff.pending_handlers.push((AuxTimerHandlerKind::Stop, set, f, timer, owner));
             XVal::Num(1.0)
         }
-        // 1 when the actor has a weapon out, 0 with it away [observed: showoff1, the 10mm
-        // pistol]. A weapon without a jam animation gives 0 [documented]; which weapons have
-        // one is not read yet, so every drawn weapon counts [hypothesis], and the engine does
-        // not play the animation yet [not built].
+        // 1 when the actor is alive, has a weapon out, and the weapon has a jam animation
+        // (including when already jamming); 0 otherwise [documented: GECK wiki
+        // ForceWeaponJamAnim (alias ForceJamAnim; .357 revolver has no jam animation and
+        // returns 0) and GetWeaponAnimJamTime; observed: showoff1, 10mm pistol away = 0
+        // and drawn = 1; observed: FalloutNV.esm WEAP DNAM Weap10mmPistol jam_time = 1.4
+        // vs WeapNV357Revolver jam_time = 0.0; observed: Fallout: New Vegas 1.4.0.525,
+        // xNVSE 6.4.9, ShowOffNVSE Plugin 184, 2026-11-23/24, GSDocMitchellHouse
+        // (0x00103DF9), 10 official base masters, probes `w1_3632_onfireweapon_and_forcejam`
+        // (`Player.ForceWeaponJamAnim` on Player 0x14: holstered 10mm `0x0000434F` = 0,
+        // drawn 10mm = 1 with `GetAnimAction = 9`, `IsAnimPlayingEx 4 = 0`, repeat call
+        // while jamming = 1, drawn Baseball Bat `0x0000421C` = 0, drawn Fists = 0),
+        // `so_34_force_weapon_jam_revolver` (`AddItem`/`EquipItem` + draw `.357`
+        // `0x0008F216` -> 0 vs 10mm `0x0000434F` -> 1), and
+        // `w4d_08_forcejam_melee_god_nonactor` (`door=0|melee(ret=0,act=0)|tgm10mm(ret=1,act=9)`)
+        // in #3679; hypothesis: animation_type 3..=9 + DNAM/jam_time > 0 as the
+        // rules-side jam-animation check].
+        // Queues the actor for `nvf_play::combat::fire` to trigger `Cycle::jam` and
+        // `WeaponAnim::jams`.
         "forceweaponjamanim" | "forcejamanim" => {
             let a = subject.unwrap_or(FormId::PLAYER_REF);
-            let out = g.extra.get(&a).is_some_and(|e| e.weapon_out) && crate::functions::items::equipped_weapon(g, a).is_some();
-            XVal::Num(f64::from(u8::from(out)))
+            let ok = !g.is_dead(a)
+                && g.extra.get(&a).is_some_and(|e| e.weapon_out)
+                && crate::functions::items::equipped_weapon(g, a).is_some_and(|w| weapon_has_jam_anim(g, w));
+            if ok {
+                if !g.showoff.force_jam_requests.contains(&a) && g.showoff.force_jam_requests.len() < MAX_FORCE_JAM_REQUESTS {
+                    g.showoff.force_jam_requests.push(a);
+                }
+                let mut st = g.senses.anim.get(&a).cloned().unwrap_or_default();
+                st.action = Some(crate::anim_state::AnimAction::Jam);
+                g.set_anim_state(a, st);
+            }
+            XVal::Num(f64::from(u8::from(ok)))
         }
         _ => return None,
     };
     Some(Ok(v))
+}
+
+/// Whether `weapon` is a gun with a jam animation [documented: GECK wiki
+/// ForceWeaponJamAnim and GetWeaponAnimJamTime; observed: FalloutNV.esm WEAP DNAM
+/// WeapNV357Revolver has jam_time = 0.0 while Weap10mmPistol has jam_time = 1.4;
+/// hypothesis: checking `DNAM/animation_type` in 3..=9 (guns, excluding melee 0..=2 and
+/// thrown/mines 10..=13) and finite `DNAM/jam_time > 0.0`].
+fn weapon_has_jam_anim(g: &Game, weapon: FormId) -> bool {
+    let anim_type = match crate::nvse::record_value(g, weapon, "DNAM", "animation_type") {
+        Some(XVal::Num(n)) if n.is_finite() => Some(n.trunc() as i64),
+        _ => g.data.weapon_anim_types.get(&g.unclone(weapon)).copied(),
+    };
+    if !matches!(anim_type, Some(3..=9)) {
+        return false;
+    }
+    matches!(
+        crate::nvse::record_value(g, weapon, "DNAM", "jam_time"),
+        Some(XVal::Num(t)) if t.is_finite() && t > 0.0
+    )
 }

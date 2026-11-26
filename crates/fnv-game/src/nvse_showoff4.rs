@@ -47,7 +47,18 @@ fn list(g: &mut Game, items: Vec<XVal>) -> XVal {
 impl Game<'_> {
     /// Live actor weapon spread in spread units (`GetCalculatedActorSpread`)
     /// [documented: GECK wiki Gun Spread Formula (New Vegas), Perk Entry Points;
-    /// hypothesis: returns the actor-spread component after `SetNoGunWobble` and
+    /// observed: Fallout: New Vegas 1.4.0.525 + xNVSE 6.4.9 + JIP LN 57.30 +
+    /// ShowOffNVSE 184, 2026-11-24, `GSDocMitchellHouse` (`0x00103DF9`), 10 official
+    /// base masters, isolated clean-room staging copy (read-only `PrintToConsole` probe;
+    /// zero writes to game install or Saves), `w4c_a06b_spread_settled` (`#3679`) and
+    /// settled 6-type `w4d_09_spread_all_anim_types`
+    /// (`tools/capture/nvse/catalogs/wave4d_extenders.json`, #3802 / PR #3803):
+    /// `PROBE|w4d_09_spread_all_anim_types|t3(0.1434,0.2359,0.1434,0.3284)|t4(0.1388,0.2313,0.1388,0.3238)|t5(0.1688,0.3538,0.3538,0.4463)|t6(0.1434,0.3284,0.3284,0.4209)|t8(0.1804,0.3654,0.3654,0.4579)|t10(0.4504,0.4459,0.4504,0.4459)|t3nw(0.1434,0.1434)`
+    /// (`t3nw(0.1434,0.1434)` confirms `SetNoGunWobble 1` leaves settled spread
+    /// unchanged; 1H guns anim 3/4: right +0.2, left 0, both +0.4; 2H weapons anim
+    /// 5/6/8: either single arm +0.4, both arms +0.6; thrown anim 10: 0 for
+    /// right/left/both); zero DLL, PDB, or third-party source consulted; hypothesis:
+    /// unprobed anim types 0..=2, 7, 9, 11..=13 and actor-spread component after
     /// `CALCULATE_GUN_SPREAD` perks, excluding weapon `min_spread` and ammo spread mods].
     pub fn calculated_actor_spread(&mut self, actor: FormId) -> f64 {
         let Some(w) = crate::functions::items::equipped_weapon(self, actor) else {
@@ -60,49 +71,54 @@ impl Game<'_> {
         };
         let setting = |g: &Game, name: &str, d: f64| g.world.setting_f32(name).map_or(d, f64::from);
 
-        let raw = if self.gun_wobble_off(actor) {
+        let aiming = actor == FormId::PLAYER_REF && (self.jip2.told.aiming || self.jip2.told.sights_up);
+        let m = self.motion(actor);
+        let unaimed = if aiming { 0.0 } else { setting(self, "fUnaimedSpreadPenalty", 0.2) };
+        let (aim_move_div, _) = self.entry_point_with(actor, crate::perks::MODIFY_AIMING_MOVE_SPEED, &[Some(base)], 1.0);
+        let moving = if !m.moving {
             0.0
+        } else if m.running {
+            setting(self, "fRunningSpreadPenalty", 0.2)
         } else {
-            let aiming = actor == FormId::PLAYER_REF && (self.jip2.told.aiming || self.jip2.told.sights_up);
-            let m = self.motion(actor);
-            let unaimed = if aiming { 0.0 } else { setting(self, "fUnaimedSpreadPenalty", 0.2) };
-            let (aim_move_div, _) = self.entry_point_with(actor, crate::perks::MODIFY_AIMING_MOVE_SPEED, &[Some(base)], 1.0);
-            let moving = if !m.moving {
-                0.0
-            } else if m.running {
-                setting(self, "fRunningSpreadPenalty", 0.2)
-            } else {
-                setting(self, "fWalkingSpreadPenalty", 0.1)
-            } / aim_move_div.max(1.0);
-            let standing = if m.sneaking { 0.0 } else { setting(self, "fStandingSpreadPenalty", 0.1) };
+            setting(self, "fWalkingSpreadPenalty", 0.1)
+        } / aim_move_div.max(1.0);
+        let standing = if m.sneaking { 0.0 } else { setting(self, "fStandingSpreadPenalty", 0.1) };
 
-            let left_arm = self.is_crippled(actor, crate::combat::LEFT_ARM);
-            let right_arm = self.is_crippled(actor, crate::combat::RIGHT_ARM);
-            // Mirrors `fnv_combat::spread::one_handed` over `schemas/fnv/objects.json`
-            // `WEAP.DNAM.animation_type` `(1 Hand)` enum entries (1, 3, 4, 10..=13);
-            // Gun Spread Formula (New Vegas) explicitly names type 4 [hypothesis: 1, 3, 10..=13].
-            let anim = field(self, "animation_type") as i64;
-            let one_handed = matches!(anim, 1 | 3 | 4 | 10..=13);
-            let arms = match (one_handed, left_arm && right_arm) {
+        let left_arm = self.is_crippled(actor, crate::combat::LEFT_ARM);
+        let right_arm = self.is_crippled(actor, crate::combat::RIGHT_ARM);
+        // Crippled-arm spread penalty by `WEAP.DNAM.animation_type`
+        // [observed: `w4d_09_spread_all_anim_types` in `wave4d_extenders.json` (#3802 / PR #3803)]:
+        // - 1H guns (anim 3, 4): right arm +0.2, left arm alone 0, both arms +0.4.
+        // - 2H ranged (anim 5, 6, 8 observed; 7, 9 grouped as [hypothesis]): either single
+        //   arm +0.4, both arms +0.6 (`fCrippledArms2HSpreadPenalty`).
+        // - Thrown/grenade/mine/melee/unarmed (anim 10 observed +0.0; 0..=2 and 11..=13
+        //   grouped as [hypothesis]): 0.0 for right, left, and both arms.
+        let anim = field(self, "animation_type") as i64;
+        let arms = match anim {
+            3 | 4 => match (left_arm, right_arm) {
                 (true, true) => setting(self, "fCrippledArms1HSpreadPenalty", 0.4),
-                (true, false) if right_arm => setting(self, "fCrippledArm1HSpreadPenalty", 0.2),
-                (false, true) => setting(self, "fCrippledArms2HSpreadPenalty", 0.6),
-                (false, false) if left_arm || right_arm => setting(self, "fCrippledArm2HSpreadPenalty", 0.4),
+                (_, true) => setting(self, "fCrippledArm1HSpreadPenalty", 0.2),
                 _ => 0.0,
-            };
-
-            let skill_code = field(self, "skill") as u16;
-            let skill = crate::functions::actor::actor_value(self, actor, skill_code).unwrap_or(0.0);
-            let strength = crate::functions::actor::actor_value(self, actor, crate::actor_values::STRENGTH).unwrap_or(0.0);
-            let (str_req_cut, _) = self.entry_point_with(actor, crate::perks::MODIFY_WEAPON_STRENGTH_REQ, &[Some(base)], 0.0);
-            let str_req = (field(self, "strength_req") - str_req_cut - strength.min(10.0)).max(0.0)
-                * setting(self, "fWeapStrengthReqPenalty", 0.025);
-            let skill_req = (field(self, "skill_req") - skill.min(100.0)).max(0.0)
-                * setting(self, "fWeapSkillReqPenalty", 0.01);
-            let skill_mult = 1.0 - setting(self, "fWobbleToSkillConversion", 0.5) * skill.clamp(0.0, 100.0) / 100.0;
-            (skill_mult * (unaimed + moving + standing + arms + str_req + skill_req))
-                .max(setting(self, "fMinGunSpreadValue", 0.01))
+            },
+            5..=9 => match (left_arm, right_arm) {
+                (true, true) => setting(self, "fCrippledArms2HSpreadPenalty", 0.6),
+                (true, false) | (false, true) => setting(self, "fCrippledArm2HSpreadPenalty", 0.4),
+                (false, false) => 0.0,
+            },
+            _ => 0.0,
         };
+
+        let skill_code = field(self, "skill") as u16;
+        let skill = crate::functions::actor::actor_value(self, actor, skill_code).unwrap_or(0.0);
+        let strength = crate::functions::actor::actor_value(self, actor, crate::actor_values::STRENGTH).unwrap_or(0.0);
+        let (str_req_cut, _) = self.entry_point_with(actor, crate::perks::MODIFY_WEAPON_STRENGTH_REQ, &[Some(base)], 0.0);
+        let str_req = (field(self, "strength_req") - str_req_cut - strength.min(10.0)).max(0.0)
+            * setting(self, "fWeapStrengthReqPenalty", 0.025);
+        let skill_req = (field(self, "skill_req") - skill.min(100.0)).max(0.0)
+            * setting(self, "fWeapSkillReqPenalty", 0.01);
+        let skill_mult = 1.0 - setting(self, "fWobbleToSkillConversion", 0.5) * skill.clamp(0.0, 100.0) / 100.0;
+        let raw = (skill_mult * (unaimed + moving + standing + arms + str_req + skill_req))
+            .max(setting(self, "fMinGunSpreadValue", 0.01));
 
         let (spread, _) = self.entry_point_with(actor, crate::perks::CALCULATE_GUN_SPREAD, &[Some(base)], raw);
         spread.max(0.0)
@@ -125,8 +141,8 @@ impl Matrix {
 
 /// An array as a matrix: a list of numbers (one row), or a list of lists of numbers all
 /// the same length; empty arrays, mixed ones, other values and ragged rows are no matrix
-/// [documented: Matrix_IsMatrix and its examples]. Only lists count [hypothesis: the
-/// pages build every matrix with ar_List].
+/// [documented: Matrix_IsMatrix and its examples]. Only list arrays count [observed:
+/// `so_01_mat_is_stringmap` (`wave4a_extenders.json`), see docs/spec-notes/ext-showoff.md §7].
 pub fn read_matrix(g: &Game, v: &XVal) -> Option<Matrix> {
     let XVal::Array(id) = v else { return None };
     let a = g.ext.array(*id).filter(|a| a.kind == ArrayKind::List && !a.entries.is_empty())?;
@@ -152,8 +168,9 @@ pub fn read_matrix(g: &Game, v: &XVal) -> Option<Matrix> {
 }
 
 /// A matrix back as an array: one-dimensional when it is a single row made from a
-/// one-dimensional input [hypothesis: the pages' one-dimensional examples dump one row
-/// and are used as arrays of numbers].
+/// one-dimensional input (observed for scalar operations and 1-D transpose in
+/// `so_04_mat_transpose_1d_shape` / `w4c_b6_08_matrix_div0_and_1d_trans`; see
+/// docs/spec-notes/ext-showoff.md §7 for remaining matrix-op shape `[hypothesis]`).
 fn write_matrix(g: &mut Game, m: Matrix) -> XVal {
     if m.flat && m.rows.len() == 1 {
         let row = m.rows.into_iter().next().unwrap_or_default();
@@ -191,7 +208,9 @@ pub fn matrix_op(a: &Matrix, op: &str, b: &Matrix) -> Option<Matrix> {
 
 /// Each element with a scalar: `+`, `-`, `*`, `/` [documented:
 /// Matrix_ApplyOperationWithScalar; "%" is not supported]. Division by 0 gives the
-/// floating-point result (an infinity) [hypothesis].
+/// floating-point infinity (`inf`) [observed: `so_02_mat_scalar_div0`
+/// (`wave4a_extenders.json`) and `w4c_b6_08_matrix_div0_and_1d_trans`
+/// (`wave4c_extenders.json`), see docs/spec-notes/ext-showoff.md §7].
 pub fn scalar_op(a: &Matrix, op: &str, s: f64) -> Option<Matrix> {
     let f: fn(f64, f64) -> f64 = match op {
         "+" => |x, y| x + y,
@@ -214,7 +233,9 @@ pub fn transpose(a: &Matrix) -> Matrix {
 /// layout]. Not normalised: the diagonal is `2(w² + a²) − 1` [observed 2026-11-08:
 /// showoff4.quat.unnormal, (2 0 0 0) gives 7 7 7], and the matrix is the transpose of the
 /// usual right-handed R·v form [observed: showoff4.quat.z90, (0.7071 0 0 0.7071) gives
-/// m[0][1] 1 and m[1][0] −1; the x and y terms transposed alike, hypothesis], worked in
+/// m[0][1] 1 and m[1][0] −1; x and y 90° rotations transpose alike in
+/// `so_03_quat_getmat_xy_transpose` (`wave4a_extenders.json`), see
+/// docs/spec-notes/ext-showoff.md §7], worked in
 /// single precision [observed: m[0][0] −5.96046e-08, exactly 2·0.70710677² − 1 in f32].
 /// A zero quaternion gives −1 on the diagonal [hypothesis: nothing is refused once
 /// nothing is normalised].
@@ -416,9 +437,10 @@ pub(crate) fn call(g: &mut Game, _ctx: &RunCtx, name: &str, subject: Option<Form
             g.ui.quest_updates_killed += 1;
             zero
         }
-        // `[bOn]`: quest lines on (1) or off (0), 1 when that changed; -1 or nothing
-        // reads whether they are on [documented: ToggleQuestMessages; hypothesis: the
-        // reading is "on", the page's "toggled on/off by this function" leaving it open].
+        // `[bOn]`: quest lines on (1) or off (0), 1 when that changed, 0 when unchanged;
+        // -1 or nothing reads 1 while they are on and 0 while off [documented:
+        // ToggleQuestMessages; observed: `so_07_toggle_quest_messages`
+        // (`wave4a_extenders.json`), see docs/spec-notes/ext-showoff.md §7].
         "togglequestmessages" => {
             let b = num(args, 0, -1.0);
             if b == -1.0 {

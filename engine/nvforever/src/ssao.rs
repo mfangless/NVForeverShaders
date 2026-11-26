@@ -713,7 +713,7 @@ fn physical_occlusion_vectors(
 /// strength and remedies of the placement that runs this frame: on the picture until the
 /// lighting hook is in place (or for good if it failed), then the lighting's.
 #[allow(clippy::type_complexity)]
-fn follow_projection(
+pub(crate) fn follow_projection(
     mut cams: Query<(&Projection, &GlobalTransform, &mut AmbientOcclusion), With<FlyCam>>,
     sky: Option<Res<crate::sky::SkyState>>,
     suns: Query<(&DirectionalLight, &GlobalTransform), With<crate::sky::Sun>>,
@@ -848,7 +848,7 @@ pub(crate) struct AoLightingGpu {
 
 /// Whether the main camera's view takes the occlusion in the lighting this frame: asked for
 /// in its settings, and the lighting hook in place. A failed hook keeps the post placement.
-fn in_lighting(settings: &AmbientOcclusion, hook: HookState) -> bool {
+pub(crate) fn in_lighting(settings: &AmbientOcclusion, hook: HookState) -> bool {
     settings.wants_lighting() && hook == HookState::Installed
 }
 

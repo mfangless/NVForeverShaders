@@ -112,16 +112,52 @@ fn added_effects_in_the_list_and_applied() {
     let f = fixture();
     let mut g = game(&f);
     assert_eq!(n(&mut g, "GetNumEffects TestDrink"), 1.0);
-    // At the top by default, appended with the flag [documented]; the new count.
+    // At the top by default (placed at index 0, returns new count n1), appended with
+    // the flag (returns 0-based inserted index n0 = n1 - 1) [observed: Fallout: New
+    // Vegas 1.4.0.525 + xNVSE 6.4.9 + JIP LN 57.30, `jip_48_addneweffect_duplicate_return`
+    // and `w4d_16_add_new_effect_edges`: n0=4 -> prepend ret=5, n=5, e0=new, e1=orig;
+    // duplicate append ret=5, n=6, last=new; non-MGEF ret=-1, n=6].
     assert_eq!(n(&mut g, "AddNewEffect TestDrink TestEffectTwo 30 7 0 0"), 2.0);
-    assert_eq!(n(&mut g, "AddNewEffect TestDrink TestEffectTwo 30 9 0 0 1"), 3.0);
+    assert_eq!(n(&mut g, "GetNumEffects TestDrink"), 2.0);
+    assert_eq!(n(&mut g, "AddNewEffect TestDrink TestEffectTwo 30 9 0 0 1"), 2.0);
+    assert_eq!(n(&mut g, "GetNumEffects TestDrink"), 3.0);
     assert_eq!(n(&mut g, "GetNthEffectBase TestDrink 0"), f64::from(MGEF2));
     assert_eq!(n(&mut g, "GetNthEffectBase TestDrink 1"), f64::from(MGEF1));
     assert_eq!(n(&mut g, "GetNthEffectBase TestDrink 2"), f64::from(MGEF2));
     assert_eq!(n(&mut g, "AddNewEffect TestStatic TestEffectTwo 30 7"), -1.0, "not a magic item");
+    assert_eq!(n(&mut g, "AddNewEffect TestDrink TestStatic 30 7 0 0 1"), -1.0, "non-MGEF effect");
+    assert_eq!(n(&mut g, "GetNumEffects TestDrink"), 3.0, "rejected calls leave count unchanged");
     // Applied: the record's at its place, then the added ones.
     let applied = g.applied_effects(FormId(ALCH));
     assert_eq!(applied.iter().map(|e| (e.effect.0, e.magnitude)).collect::<Vec<_>>(), vec![(MGEF1, 5), (MGEF2, 7), (MGEF2, 9)]);
+}
+
+/// `TempCloneForm` clones of magic items inherit effects (and pre-clone session edits)
+/// and isolate post-clone `AddNewEffect` / trait / base edits from the original
+/// [observed: `w6d2_06_magic_effects_tempclone_isolation`].
+#[test]
+fn tempclone_magic_effects_inherit_and_isolate() {
+    let f = fixture();
+    let mut g = game(&f);
+    let XVal::Ref(cl) = q(&mut g, "SetFunctionValue (TempCloneForm TestDrink 0)") else { panic!("clone ref") };
+    assert_ne!(cl, 0);
+    let cl_id = FormId(cl);
+    assert_eq!(g.effect_count(cl_id), 1);
+    assert_eq!(n(&mut g, &format!("GetNumEffects (StringToRef \"{cl:08X}\")")), 1.0);
+    assert_eq!(n(&mut g, &format!("GetNthEffectBase (StringToRef \"{cl:08X}\") 0")), f64::from(MGEF1));
+    assert_eq!(n(&mut g, &format!("GetNthEffectTraitNumeric (StringToRef \"{cl:08X}\") 0 0")), 5.0);
+
+    // AddNewEffect on the clone appends cleanly without mutating the original.
+    assert_eq!(n(&mut g, &format!("AddNewEffect (StringToRef \"{cl:08X}\") TestEffectTwo 10 3 0 0 1")), 1.0);
+    assert_eq!(n(&mut g, &format!("GetNumEffects (StringToRef \"{cl:08X}\")")), 2.0);
+    assert_eq!(n(&mut g, "GetNumEffects TestDrink"), 1.0);
+
+    // Pre-clone edit on original carries to a new clone while later edits stay isolated.
+    q(&mut g, "SetNthEffectTraitNumeric TestDrink 0 0 12");
+    let XVal::Ref(cl2) = q(&mut g, "SetFunctionValue (TempCloneForm TestDrink 0)") else { panic!("clone2 ref") };
+    q(&mut g, "SetNthEffectTraitNumeric TestDrink 0 0 20");
+    assert_eq!(n(&mut g, &format!("GetNthEffectTraitNumeric (StringToRef \"{cl2:08X}\") 0 0")), 12.0);
+    assert_eq!(n(&mut g, "GetNthEffectTraitNumeric TestDrink 0 0"), 20.0);
 }
 
 /// Every Nth-effect function indexes one list: AddNewEffect's at the top, the record's
@@ -130,16 +166,18 @@ fn added_effects_in_the_list_and_applied() {
 fn nth_effect_functions_share_one_index() {
     let f = fixture();
     let mut g = game(&f);
-    // [front 7] [record 5] [back 9]
+    // [front 7] [record 5] [back 9]; prepend returns new count n1, append returns n1 - 1
+    // [observed: `jip_48_addneweffect_duplicate_return`, `w4d_16_add_new_effect_edges`].
     assert_eq!(n(&mut g, "AddNewEffect TestDrink TestEffectTwo 30 7 0 0"), 2.0);
-    assert_eq!(n(&mut g, "AddNewEffect TestDrink TestEffectTwo 40 9 0 0 1"), 3.0);
+    assert_eq!(n(&mut g, "AddNewEffect TestDrink TestEffectTwo 40 9 0 0 1"), 2.0);
     // The record's entry goes: [front 7] [back 9].
     assert_eq!(n(&mut g, "RemoveNthEffect TestDrink 1"), 2.0);
     assert_eq!(n(&mut g, "GetNumEffects TestDrink"), 2.0);
-    // The count AddNewEffect gives is the list's, so the new entry is reachable by it.
-    let count = n(&mut g, "AddNewEffect TestDrink TestEffectOne 50 11 0 0 1");
-    assert_eq!(count, 3.0);
-    assert_eq!(n(&mut g, &format!("GetNthEffectBase TestDrink {}", count - 1.0)), f64::from(MGEF1));
+    // AddNewEffect returns the 0-based inserted index, so GetNthEffectBase reads it directly.
+    let idx = n(&mut g, "AddNewEffect TestDrink TestEffectOne 50 11 0 0 1");
+    assert_eq!(idx, 2.0);
+    assert_eq!(n(&mut g, "GetNumEffects TestDrink"), 3.0);
+    assert_eq!(n(&mut g, &format!("GetNthEffectBase TestDrink {idx}")), f64::from(MGEF1));
     // A loop over 0..GetNumEffects-1 reads matching bases and traits.
     let mut seen = Vec::new();
     for i in 0..n(&mut g, "GetNumEffects TestDrink") as u32 {
@@ -265,6 +303,10 @@ fn anim_sequence_frequency_semantics_and_sanitization() {
     assert_eq!(g.anim_frequency(acti, "Idle"), None);
 
     // Exact sequence name (case-insensitive) takes precedence over "*"; alias works too.
+    // Querying "*" literally returns -1.0 both before and after SetAnimSequenceFrequency "*"
+    // [observed: w4c_b1_22_sound3d_anim_freq].
+    assert_eq!(n(&mut g, "StatRef.GetAnimSequenceFrequency \"*\""), -1.0);
+    assert_eq!(n(&mut g, "StatRef.GetAnimSeqFreq \"*\""), -1.0);
     q(&mut g, "StatRef.SetAnimSeqFreq \"FoRwArD\" 2.25");
     assert_eq!(g.anim_frequency(stat, "forward"), Some(2.25));
     assert_eq!(g.anim_frequency(stat, "FORWARD"), Some(2.25));

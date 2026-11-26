@@ -210,6 +210,7 @@ fn bake_copy(material: &mut TerrainMaterial) {
     for height in [&mut e.height0, &mut e.height1, &mut e.height2, &mut e.height3, &mut e.height4, &mut e.height5] { *height = None; }
     e.parallax = false;
     e.parallax_depths = [0.0; crate::terrain::FOLDED_LAYERS];
+    e.alpha_heights = 0;
     material.base.fog_enabled = false;
     material.base.normal_map_texture = None;
 }
@@ -2211,7 +2212,12 @@ pub(crate) mod tests {
             ("roulette", crate::roulette_view::ROULETTE_LAYER), ("poker", crate::poker_view::POKER_LAYER),
             ("decal", crate::decals::DECAL_LAYER), ("scope", crate::scope_view::SCOPE_LAYER),
             ("vigor", nvf_play::chargen::vigor::VIGOR_LAYER), ("creator", crate::creator_view::STUDIO_LAYER),
-            ("vats", crate::vats_highlight::MASK_LAYER), ("bake", BAKE_LAYER), ("culled", crate::rooms::CULL_LAYER),
+            ("vats", crate::vats_highlight::MASK_LAYER), ("bake", BAKE_LAYER),
+            ("overlay_pre_is", crate::camera_overlay::OVERLAY_PRE_IS_LAYER),
+            ("overlay_pre_ui", crate::camera_overlay::OVERLAY_PRE_UI_LAYER),
+            ("culled", crate::rooms::CULL_LAYER),
+            ("volumetric clouds", crate::volumetric_clouds::VOLUME_LAYER),
+            ("flat clouds beside the volume", crate::volumetric_clouds::FLAT_CLOUD_LAYER),
         ];
         for (i, a) in layers.iter().enumerate() {
             for b in &layers[i + 1..] { assert_ne!(a.1, b.1, "{} and {}", a.0, b.0); }

@@ -46,6 +46,8 @@ pub struct RowShown {
     /// loads now ([`Row::loaded`]; #3442: the list drawn from tiles left that out, so the
     /// Ammo tab marked nothing).
     pub equipped: bool,
+    /// Ammo the weapon cannot fire: the row's text at half alpha ([`Row::dim`], #3442).
+    pub dim: bool,
     /// Resolved ySI tag/icon/template for this row when ySI is active (`None` otherwise).
     pub ysi: Option<fnv_game::ui_ysi::YsiItemDisplay>,
 }
@@ -87,6 +89,10 @@ pub struct Snapshot {
     /// The container adapter's Take All hint.
     pub take_all_hint: String,
     pub note: Option<String>,
+    /// Whether `apply_row_icon` should instantiate `ySIImage` row tiles (`yUI.ini`
+    /// `[Sorting and Icons] bAddInventoryIcons`, gated by `bSortingIcons`) [design:
+    /// `docs/spec-notes/yui-ini.md`].
+    pub ysi_icons: bool,
 }
 
 /// The rows of a listing with their keys.
@@ -94,7 +100,7 @@ pub fn rows_shown(rows: &[Row]) -> Vec<RowShown> {
     let mut out: Vec<RowShown> = Vec::with_capacity(rows.len());
     for (index, r) in rows.iter().enumerate() {
         let Some(key) = RowKey::at(rows, index) else { continue };
-        out.push(RowShown { key, name: r.name.clone(), text: look::row_text(r), equipped: r.equipped || r.loaded, ysi: r.ysi.clone() });
+        out.push(RowShown { key, name: r.name.clone(), text: look::row_text(r), equipped: r.equipped || r.loaded, dim: r.dim, ysi: r.ysi.clone() });
     }
     out
 }
@@ -110,6 +116,7 @@ pub struct MenuTiles {
     shown: Option<Snapshot>,
     written_in: Option<TileId>,
     pub sizes: SizesWritten,
+    text_scale:f32,
     /// A press on a marker, held.
     pub drag: Option<Drag>,
     /// The scroll last logged as drawn.
@@ -149,7 +156,7 @@ impl MenuTiles {
 
     pub fn new(paths: &'static Paths) -> Self {
         Self { paths, menu: None, rows: Default::default(), views: Default::default(), shown: None,
-            written_in: None, sizes: Default::default(), drag: None, drawn: [None; 2], warned: false }
+            written_in: None, sizes: Default::default(), text_scale:1.0, drag: None, drawn: [None; 2], warned: false }
     }
 }
 
@@ -172,12 +179,16 @@ pub fn write_lists(ui: &mut Ui, s: &Snapshot, st: &mut MenuTiles) {
         for (row, shown) in st.rows[i].iter().zip(&s.lists[i].rows) {
             if let Some(t) = list::child(ui, row.tile, st.paths.row_text) {
                 ui.set_trait(t, "string", Value::Str(shown.text.clone()));
-                ui.set_trait(t, "alpha", Value::Num(255.0));
+                ui.set_trait(t, "alpha", Value::Num(if shown.dim { 128.0 } else { 255.0 }));
             }
             if let Some(t) = list::child(ui, row.tile, st.paths.row_mark) {
                 ui.set_trait(t, "visible", on(shown.equipped));
             }
-            fnv_game::ui_ysi::apply_row_icon(ui, &fnv_ui::MemSource::default(), row.tile, shown.ysi.as_ref());
+            if s.ysi_icons {
+                fnv_game::ui_ysi::apply_row_icon(ui, &fnv_ui::MemSource::default(), row.tile, shown.ysi.as_ref());
+            } else if let Some(existing) = list::child(ui, row.tile, fnv_game::ui_ysi::YSI_IMAGE_TILE) {
+                ui.unload_tile(existing);
+            }
         }
         set(ui, st.paths.titles[i], "string", Value::Str(s.titles[i].clone()));
         set(ui, st.paths.lists[i], "_num_filtered", Value::Num(s.lists[i].filtered as f64));
@@ -201,13 +212,19 @@ pub fn settle(ui: &mut Ui, s: &Snapshot, st: &mut MenuTiles, write_sizes: &mut d
         let i = side as usize;
         let Some(list_tile) = ui.find_tile(st.paths.lists[i]) else { continue };
         let shown = &s.lists[i];
-        list::settle_list(ui, list_tile, &st.rows[i], st.paths.row_text, &mut st.views[i], shown.selected, shown.category as u32, s.pointer_pick, s.navigated);
+        list::settle_list_sized(ui,list_tile,&st.rows[i],st.paths.row_text,&mut st.views[i],
+            list::RowLayout {selected:shown.selected,group:shown.category as u32,pointer_pick:s.pointer_pick,navigated:s.navigated,text_scale:st.text_scale,minimum_height:51.0});
     }
     st.rewrite(ui);
     ui.update();
 }
 
 impl MenuTiles {
+    pub(crate) fn text_scale(&self)->f32 {self.text_scale}
+    pub(crate) fn set_text_scale(&mut self,scale:f32) {
+        if self.text_scale!=scale {self.text_scale=scale;self.sizes.clear();self.written_in=None;self.drag=None;}
+    }
+
     /// [`settle`] with the snapshot written last, on every frame the menu is drawn.
     pub fn settle_shown(&mut self, ui: &mut Ui, write_sizes: &mut dyn FnMut(&mut Ui, &mut SizesWritten) -> usize) {
         if let Some(s) = self.shown.take() {
@@ -274,6 +291,11 @@ impl MenuTiles {
     /// A list's scroll now.
     pub fn value(&self, side: Side) -> f64 {
         self.views[side as usize].value
+    }
+    /// Current list value, upper bound and page extent, independent of selection.
+    pub fn scroll_extent(&self, side: Side) -> (f64, f64, f64) {
+        let view = &self.views[side as usize];
+        (view.value, view.counts.most(), view.counts.visible)
     }
 
     /// Set a list's scroll, held in its bar's range (the bar's pieces, the marker's drag): the
@@ -425,6 +447,7 @@ mod tests {
             price: None,
             bartered: false,
             loaded,
+            dim: false,
             mods: 0,
             mods_value: 0,
             folder: None,
