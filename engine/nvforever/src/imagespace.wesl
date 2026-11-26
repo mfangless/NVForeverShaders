@@ -134,11 +134,20 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let marked = abs(src.a - SCREEN_MARK) < 0.02;
     if !marked {
         if grade.dof_mode.w > 0.5 {
-            // AgX Punchy look (Troy Sobotka) calibrated for Mojave daylight: crisp shadow
-            // toe, clean highlight headroom, and saturated cobalt sky purity.
-            c = pow(clamp(c * 1.05, vec3(1e-6), vec3(1.0)), vec3(1.22));
+            // AgX Punchy look calibrated for Mojave daylight with a skin-safe shadow toe
+            // and warm-hue vibrance taper (preserves cobalt sky purity while keeping
+            // facial SSS shadows velvety instead of crushed or over-saturated).
+            let pre = clamp(c * 1.05, vec3(1e-6), vec3(1.0));
+            let pre_lum = dot(pre, vec3(0.2125, 0.7154, 0.0721));
+            let toe_exp = mix(1.04, 1.20, smoothstep(0.0, 0.28, pre_lum));
+            c = pow(pre, vec3(toe_exp));
             let agx_lum = dot(c, vec3(0.2125, 0.7154, 0.0721));
-            c = clamp(mix(vec3(agx_lum), c, 1.36), vec3(0.0), vec3(1.0));
+            let c_max = max(c.r, max(c.g, c.b));
+            let c_min = min(c.r, min(c.g, c.b));
+            let sat = select(0.0, (c_max - c_min) / c_max, c_max > 1e-4);
+            let warm = smoothstep(0.0, 0.12, c.r - c.b);
+            let sat_boost = mix(1.36, 1.14, warm * smoothstep(0.22, 0.58, sat));
+            c = clamp(mix(vec3(agx_lum), c, sat_boost), vec3(0.0), vec3(1.0));
         }
         let lum = dot(c, vec3(0.2125, 0.7154, 0.0721));
         c = mix(vec3(lum), c, grade.saturation);
