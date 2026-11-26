@@ -35,6 +35,7 @@ fn every_world_material_compiles_with_physical_pbr() {
         let mut compiler = Compiler::with_physical_pbr_diffuse(diffuse);
         for (shader, extra) in [
             ("nvf_assets/nif_material.wesl", &["NVF_PHYSICAL_PBR"][..]),
+            ("nvf_assets/nif_material.wesl", &["NVF_PHYSICAL_PBR", "NVF_OUTFIT"][..]),
             ("nvf_assets/nif_material.wesl", &["NVF_PHYSICAL_PBR", "MAY_DISCARD"][..]),
             ("nvf_assets/nif_material.wesl", &["NVF_PHYSICAL_PBR", "FIRST_PERSON_DEPTH"][..]),
             (

@@ -640,3 +640,119 @@ fn nvf_sss_directional_hair(light_id: u32, N: vec3<f32>, T: vec3<f32>, V: vec3<f
     let light = &view_bindings::lights.directional_lights[light_id];
     return nvf_hair_eval(T, N, V, (*light).direction_to_light.xyz, albedo, perceptual_roughness, shadow) * (*light).color.rgb;
 }
+
+// ---------------------------------------------------------------------------------------
+// NVF_OUTFIT (un-authored vanilla outfits & armor under NVF_PHYSICAL_PBR): Charlie
+// micro-fiber cloth sheen BRDF (Estevez & Kulla 2017, "Production Friendly Microfacet
+// Sheen BRDF"). Sheen strength rides in `material.thickness` (set by `nif_material.wesl`).
+// Strictly linear in `shadow` so first-person `with_shade_light` subtraction stays exact.
+
+const NVF_CLOTH_SHEEN_ROUGH: f32 = 0.45;
+
+fn nvf_charlie_d(roughness: f32, ndoth: f32) -> f32 {
+    let r = max(roughness, 0.05);
+    let inv_r = 1.0 / r;
+    let cos2h = ndoth * ndoth;
+    let sin2h = max(1.0 - cos2h, 0.0078125);
+    return (2.0 + inv_r) * pow(sin2h, 0.5 * inv_r) / (2.0 * PI);
+}
+
+fn nvf_charlie_l(x: f32, r: f32) -> f32 {
+    let t = (1.0 - r) * (1.0 - r);
+    let a = mix(21.5473, 25.3245, t);
+    let b = mix(3.82987, 3.32435, t);
+    let c = mix(0.19823, 0.16801, t);
+    let d = mix(-1.97760, -1.27393, t);
+    let e = mix(-4.32054, -4.85967, t);
+    return a / (1.0 + b * pow(x, c)) + d * x + e;
+}
+
+fn nvf_charlie_v(ndotv: f32, ndotl: f32) -> f32 {
+    let v = clamp(ndotv, 0.001, 1.0);
+    let l = clamp(ndotl, 0.001, 1.0);
+    let r = NVF_CLOTH_SHEEN_ROUGH;
+    let lv = select(exp(2.0 * nvf_charlie_l(0.5, r) - nvf_charlie_l(1.0 - v, r)), exp(nvf_charlie_l(v, r)), v < 0.5);
+    let ll = select(exp(2.0 * nvf_charlie_l(0.5, r) - nvf_charlie_l(1.0 - l, r)), exp(nvf_charlie_l(l, r)), l < 0.5);
+    return 1.0 / max((1.0 + lv + ll) * 4.0 * v * l, 1e-4);
+}
+
+fn nvf_cloth_sheen_color(diffuse_color: vec3<f32>) -> vec3<f32> {
+    let luma = max(dot(diffuse_color, vec3(0.2126, 0.7152, 0.0722)), 1e-4);
+    let tint = clamp(diffuse_color / luma, vec3(0.5), vec3(1.6));
+    return mix(vec3(0.85), tint * 0.45 + vec3(0.45), 0.55);
+}
+
+fn nvf_outfit_sheen_eval(
+    N: vec3<f32>,
+    V: vec3<f32>,
+    L: vec3<f32>,
+    diffuse_color: vec3<f32>,
+    sheen_strength: f32,
+    shadow: f32,
+    light_rad: vec3<f32>,
+) -> vec3<f32> {
+    if sheen_strength <= 0.001 {
+        return vec3(0.0);
+    }
+    let ndotl = dot(N, L);
+    let ndotv = max(dot(N, V), 0.0001);
+    let s = saturate(shadow);
+    // Soft fabric terminator wrap past 90° while keeping strict linearity in `s`.
+    let wrap_ndl = saturate((ndotl + 0.15) / 1.15);
+    let H = nvf_sss_safe_normalize(L + V, N);
+    let ndoth = saturate(dot(N, H));
+    let d = nvf_charlie_d(NVF_CLOTH_SHEEN_ROUGH, ndoth);
+    let v = nvf_charlie_v(ndotv, max(ndotl, 0.05));
+    let sheen_col = nvf_cloth_sheen_color(diffuse_color);
+    return sheen_col * (sheen_strength * d * v * wrap_ndl * s * 0.35) * light_rad;
+}
+
+fn nvf_sss_clustered_outfit(
+    light_id: u32,
+    P: vec3<f32>,
+    N: vec3<f32>,
+    V: vec3<f32>,
+    diffuse_color: vec3<f32>,
+    sheen_strength: f32,
+    shadow: f32,
+    is_spot: bool,
+    is_display: bool,
+) -> vec3<f32> {
+    if sheen_strength <= 0.001 {
+        return vec3(0.0);
+    }
+    let light = &view_bindings::clustered_lights.data[light_id];
+    let to_light = (*light).position_radius.xyz - P;
+    let d2 = dot(to_light, to_light);
+    let L = to_light * inverseSqrt(max(d2, 0.0001));
+    var attenuation = getDistanceAttenuation(d2, (*light).color_inverse_square_range.w);
+    if is_spot {
+        attenuation *= nvf_sss_spot_attenuation(light_id, L);
+    }
+    let light_rad = nvf_sss_light_radiance((*light).color_inverse_square_range.rgb, is_display, true) * (attenuation * PI);
+    return nvf_outfit_sheen_eval(N, V, L, diffuse_color, sheen_strength, shadow, light_rad);
+}
+
+fn nvf_sss_point_outfit(light_id: u32, P: vec3<f32>, N: vec3<f32>, V: vec3<f32>, diffuse_color: vec3<f32>, sheen_strength: f32, shadow: f32, is_display: bool) -> vec3<f32> {
+    return nvf_sss_clustered_outfit(light_id, P, N, V, diffuse_color, sheen_strength, shadow, false, is_display);
+}
+
+fn nvf_sss_spot_outfit(light_id: u32, P: vec3<f32>, N: vec3<f32>, V: vec3<f32>, diffuse_color: vec3<f32>, sheen_strength: f32, shadow: f32, is_display: bool) -> vec3<f32> {
+    return nvf_sss_clustered_outfit(light_id, P, N, V, diffuse_color, sheen_strength, shadow, true, is_display);
+}
+
+fn nvf_sss_directional_outfit(light_id: u32, N: vec3<f32>, V: vec3<f32>, diffuse_color: vec3<f32>, sheen_strength: f32, shadow: f32) -> vec3<f32> {
+    let light = &view_bindings::lights.directional_lights[light_id];
+    return nvf_outfit_sheen_eval(N, V, (*light).direction_to_light.xyz, diffuse_color, sheen_strength, shadow, (*light).color.rgb);
+}
+
+fn nvf_outfit_sheen_sky(NdotV: f32, diffuse_color: vec3<f32>, sheen_strength: f32, env_diffuse: vec3<f32>) -> vec3<f32> {
+    if sheen_strength <= 0.001 {
+        return vec3(0.0);
+    }
+    let grazing = pow(1.0 - saturate(NdotV), 3.0);
+    let e_charlie = 0.08 + 0.55 * grazing;
+    let sheen_col = nvf_cloth_sheen_color(diffuse_color);
+    let sky_irrad = min(env_diffuse / max(diffuse_color, vec3(0.05)), vec3(4.0));
+    return sheen_col * sky_irrad * (sheen_strength * e_charlie * 0.45);
+}

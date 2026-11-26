@@ -108,6 +108,7 @@ import nvf_assets::nif_surface_bindings::{NifSurface, nif_surface, standard_mate
 @if(NVF_PBR_VIEW_OCCLUSION && !PREPASS_PIPELINE) import bevy_pbr::render::pbr_types::STANDARD_MATERIAL_FLAGS_OCCLUSION_TEXTURE_BIT;
 @if(NVF_PBR_VIEW_HEIGHT && !PREPASS_PIPELINE) import nvf_assets::nif_surface_bindings::height_texel;
 @if(NVF_PBR_VIEW_HEIGHT && !PREPASS_PIPELINE) import bevy_pbr::render::pbr_types::STANDARD_MATERIAL_FLAGS_DEPTH_MAP_BIT;
+@if(NVF_OUTFIT && !PREPASS_PIPELINE) import bevy_pbr::render::pbr_types::STANDARD_MATERIAL_FLAGS_SPECULAR_TEXTURE_BIT;
 @if(NVF_PBR_PARALLAX_MASK && !PREPASS_PIPELINE) import bevy_pbr::render::pbr_types as parallax_mask_types;
 @if(MESH_TERRAIN_BLEND) import nvf_assets::nif_surface_bindings::{mesh_terrain_lookup, mesh_terrain_view, mesh_terrain_shading, mesh_terrain_unlit_view, mesh_terrain_diagnostic, mesh_terrain_blend_normal, mesh_terrain_target_colour, mesh_terrain_target_normal, mesh_terrain_face_up, MeshTerrainInputs, LOOKUP_SUCCESS, LAND_ROUGHNESS, LAND_REFLECTANCE};
 @if(!NIF_SURFACE_BLEND) import nvf_assets::nif_surface_bindings::{env_cube_texel, env_mask_texel, env_mask_alpha};
@@ -840,6 +841,88 @@ fn nif_fragment(
     @if(NVF_SKIN_SSS && !PREPASS_PIPELINE && VERTEX_UVS_B) let SKIN_CURVATURE_MIN = 0.10;
     @if(NVF_SKIN_SSS && !PREPASS_PIPELINE && VERTEX_UVS_B) pbr_input.material.thickness = clamp(in.uv_b.x * SKIN_CURVATURE_SCALE, SKIN_CURVATURE_MIN, 0.45);
     @if(NVF_SKIN_SSS && !PREPASS_PIPELINE && !VERTEX_UVS_B) pbr_input.material.thickness = clamp(0.15 + 0.02 * skin_curv_raw, 0.15, 0.18);
+    // NVF_OUTFIT (Pass A + Pass B under NVF_PHYSICAL_PBR): reinterprets un-authored vanilla
+    // outfit/armor normal-alpha specular masks into physical roughness, clamped dielectric
+    // F0 (> 0.02 so shadowed regions keep sky Fresnel), Kaplanyan & Hill (2016) Specular AA,
+    // wrinkle cavity occlusion, metallic hardware / env-mask separation, and cloth sheen
+    // strength carried in `material.thickness` for `sss.wesl` Charlie sheen.
+    @if(NVF_OUTFIT && NVF_PHYSICAL_PBR && !PREPASS_PIPELINE) {
+        let outfit_dndx = dpdx(pbr_input.N);
+        let outfit_dndy = dpdy(pbr_input.N);
+        let outfit_n_var = dot(outfit_dndx, outfit_dndx) + dot(outfit_dndy, outfit_dndy);
+        @if(VERTEX_UVS_A) let outfit_uv = (standard_material(in.instance_index).uv_transform * vec3(in.uv, 1.0)).xy;
+        @if(VERTEX_UVS_A) let outfit_raw_mask = normal_map_texel(in.instance_index, outfit_uv).a;
+        @if(!NIF_SURFACE_BLEND && VERTEX_UVS_A) let outfit_env_m = env_mask_texel(in.instance_index, outfit_uv);
+        pbr_input.material.thickness = 0.0;
+        if surface.emissive_rule.w < 0.5 && surface.terrain.z > 0.5 {
+            var outfit_mask = 0.25;
+            @if(VERTEX_UVS_A) {
+                outfit_mask = select(0.25, outfit_raw_mask, (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_SPECULAR_TEXTURE_BIT) != 0u);
+            }
+            let outfit_gn = normalize(pbr_input.world_normal);
+            let outfit_tilt = saturate(1.0 - dot(pbr_input.N, outfit_gn));
+            let outfit_rgb = pbr_input.material.base_color.rgb;
+            let outfit_cmax = max(outfit_rgb.r, max(outfit_rgb.g, outfit_rgb.b));
+            let outfit_cmin = min(outfit_rgb.r, min(outfit_rgb.g, outfit_rgb.b));
+            let outfit_sat = select(0.0, (outfit_cmax - outfit_cmin) / outfit_cmax, outfit_cmax > 1e-4);
+            let outfit_lum = dot(outfit_rgb, vec3(0.2126, 0.7152, 0.0722));
+            let outfit_class = surface.terrain.z;
+            var r_out = 0.72;
+            var f0_out = 0.04;
+            var outfit_metal = 0.0;
+            var cav_occ = 1.0;
+            var cloth_sheen = 0.0;
+            if outfit_class < 1.5 {
+                // Leather / hide / biker / raider armor: worn ridges glisten, folds stay matte,
+                // achromatic bright mask patches separate steel buckles/studs/knee plates.
+                let m = smoothstep(0.08, 0.85, outfit_mask);
+                r_out = mix(0.84, 0.38, m);
+                f0_out = mix(0.032, 0.046, m);
+                let metal_det = smoothstep(0.32, 0.65, outfit_mask)
+                    * (1.0 - smoothstep(0.16, 0.32, outfit_sat))
+                    * smoothstep(0.035, 0.10, outfit_lum);
+                outfit_metal = metal_det * 0.82;
+                r_out = mix(r_out, mix(0.46, 0.24, m), outfit_metal);
+                cav_occ = mix(0.45, 1.0, m) * saturate(1.0 - 1.4 * outfit_tilt);
+                cloth_sheen = 0.12 * (1.0 - m) * (1.0 - outfit_metal);
+            } else if outfit_class < 2.5 {
+                // Cloth / Vault suits / coats / shirts: matte woven diffuse + Charlie fuzz.
+                let m = smoothstep(0.06, 0.75, outfit_mask);
+                r_out = mix(0.94, 0.70, m);
+                f0_out = mix(0.024, 0.038, m);
+                let metal_det = smoothstep(0.50, 0.80, outfit_mask)
+                    * (1.0 - smoothstep(0.18, 0.35, outfit_sat))
+                    * smoothstep(0.05, 0.14, outfit_lum);
+                outfit_metal = metal_det * 0.75;
+                r_out = mix(r_out, mix(0.44, 0.28, m), outfit_metal);
+                cav_occ = mix(0.55, 1.0, m) * saturate(1.0 - 1.1 * outfit_tilt);
+                cloth_sheen = (0.58 * (1.0 - 0.65 * m)) * (1.0 - outfit_metal);
+            } else {
+                // Metal / env-masked armor (Power Armor, Combat Armor, Metal Armor, Riot Gear).
+                var has_env_mask = false;
+                var env_m = outfit_mask;
+                @if(!NIF_SURFACE_BLEND && VERTEX_UVS_A) {
+                    has_env_mask = surface.env.y > 0.5 && surface.env.y < 1.5;
+                    if has_env_mask {
+                        env_m = outfit_env_m;
+                    }
+                }
+                let metal_mask = select(smoothstep(0.25, 0.72, outfit_mask), smoothstep(0.12, 0.70, env_m), has_env_mask);
+                outfit_metal = metal_mask * 0.85;
+                r_out = mix(0.76, 0.28, metal_mask);
+                f0_out = 0.04;
+                cav_occ = mix(0.50, 1.0, metal_mask) * saturate(1.0 - 1.3 * outfit_tilt);
+                cloth_sheen = 0.18 * (1.0 - metal_mask);
+            }
+            let a_aa = r_out * r_out;
+            let a_filtered = sqrt(clamp(a_aa * a_aa + clamp(0.25 * outfit_n_var, 0.0, 0.18), 0.002, 1.0));
+            pbr_input.material.perceptual_roughness = clamp(sqrt(a_filtered), 0.08, 0.98);
+            pbr_input.material.reflectance = vec3(sqrt(f0_out / 0.16));
+            pbr_input.material.metallic = outfit_metal;
+            pbr_input.specular_occlusion = pbr_input.specular_occlusion * cav_occ;
+            pbr_input.material.thickness = cloth_sheen;
+        }
+    }
     // NVF_PBR_PARALLAX_MASK (nvf-assets authored.rs `parallax_mask`, a development switch, off
     // unless NVF_PBR_PARALLAX_MASK=1 at the start): an alpha-tested shape may carry a height
     // map. Its alpha (material x vertex x texel) is read again at the unshifted coordinates,
@@ -1172,6 +1255,9 @@ fn nif_fragment(
                 let ndotv = max(dot(pbr_input.N, pbr_input.V), 0.0001);
                 let fresnel_w = select(0.35 + 0.65 * pow(1.0 - ndotv, 3.0), 0.08 + 0.92 * pow(1.0 - ndotv, 4.0), surface.env.y < 0.5);
                 reflection *= recv * fresnel_w;
+            }
+            @if(NVF_OUTFIT && NVF_PHYSICAL_PBR) if surface.emissive_rule.w < 0.5 && surface.terrain.z >= 2.5 {
+                reflection *= 0.25;
             }
             out.color = vec4(out.color.rgb + reflection, out.color.a);
         }

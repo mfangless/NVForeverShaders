@@ -15,6 +15,8 @@ const IMPORT_TEXT: &str = "// NVForever subsurface scattering (nvforever sss.rs)
 @if(NVF_FOLIAGE_SSS) import nvforever::sss::{nvf_sss_point_foliage, nvf_sss_spot_foliage, nvf_sss_directional_foliage};
 @if(NVF_SKIN_SSS && NVF_SKIN_SPLIT) import nvforever::sss::nvf_skin_last_diffuse;
 @if(NVF_HAIR) import nvforever::sss::{nvf_sss_point_hair, nvf_sss_spot_hair, nvf_sss_directional_hair};
+@if(NVF_OUTFIT) import nvforever::sss::{nvf_sss_point_outfit, nvf_sss_spot_outfit, nvf_sss_directional_outfit};
+@if(NVF_OUTFIT && ENVIRONMENT_MAP) import nvforever::sss::nvf_outfit_sheen_sky;
 ";
 
 const PHYSICAL_DIFFUSE_ANCHOR: &str = "    lighting_input.diffuse_color = diffuse_color;\n";
@@ -65,6 +67,8 @@ const FOLIAGE_WEIGHT_PHYSICAL: &str = "    // NVForever subsurface scattering (n
 const ENV_DIFFUSE_ANCHOR: &str = "    indirect_light += environment_light.diffuse * nvf_ibl_diff_ao;\n";
 const ENV_DIFFUSE_SPLIT_TEXT: &str = "    @if(NVF_SKIN_SSS && NVF_SKIN_SPLIT)
     nvf_skin_d_indirect += environment_light.diffuse * nvf_ibl_diff_ao;
+    @if(NVF_OUTFIT)
+    indirect_light += nvf_outfit_sheen_sky(NdotV, diffuse_color, thickness, environment_light.diffuse) * nvf_ibl_diff_ao;
 ";
 
 /// Physical PBR: before the display weights (`physical_patched`), the skin's specular light
@@ -96,6 +100,7 @@ const DIR_ANCHOR: &str = "        var light_contrib = lighting::directional_ligh
 fn clustered_sss_text(kind: &str, ao_var: &str, physical: bool) -> String {
     let p = if physical { "true" } else { "false" };
     let hair = if physical { clustered_hair_text(kind, ao_var) } else { String::new() };
+    let outfit = if physical { clustered_outfit_text(kind, ao_var) } else { String::new() };
     format!(
         "        @if(NVF_SKIN_SSS && NVF_AMBIENT_OCCLUSION)
         let nvf_skin_{ao_var}_ao = select(nvf_ao_lamps, vec3(1.0), !nvf_display || ((in.flags & MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u && (view_bindings::clustered_lights.data[light_id].flags & mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u));
@@ -115,7 +120,7 @@ fn clustered_sss_text(kind: &str, ao_var: &str, physical: bool) -> String {
         if enable_diffuse {{
             direct_light += nvf_sss_{kind}_foliage(light_id, in.world_position.xyz, in.N, in.V, diffuse_color, shadow, nvf_display, {p}) * nvf_sss_weight * nvf_foliage_{ao_var}_ao;
         }}
-{hair}"
+{hair}{outfit}"
     )
 }
 
@@ -135,12 +140,37 @@ fn clustered_hair_text(kind: &str, ao_var: &str) -> String {
     )
 }
 
+/// NVF_OUTFIT (physical PBR only): Charlie micro-fiber cloth sheen for one point or spot
+/// light, using sheen strength carried in `thickness`.
+fn clustered_outfit_text(kind: &str, ao_var: &str) -> String {
+    format!(
+        "        @if(NVF_OUTFIT && NVF_AMBIENT_OCCLUSION)
+        let nvf_outfit_{ao_var}_ao = select(nvf_ao_lamps, vec3(1.0), !nvf_display || ((in.flags & MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u && (view_bindings::clustered_lights.data[light_id].flags & mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u));
+        @if(NVF_OUTFIT && !NVF_AMBIENT_OCCLUSION)
+        let nvf_outfit_{ao_var}_ao = vec3(1.0);
+        @if(NVF_OUTFIT)
+        if enable_diffuse {{
+            direct_light += nvf_sss_{kind}_outfit(light_id, in.world_position.xyz, in.N, in.V, diffuse_color, thickness, shadow, nvf_display) * nvf_outfit_{ao_var}_ao;
+        }}
+"
+    )
+}
+
 fn directional_sss_text(physical: bool) -> String {
     let p = if physical { "true" } else { "false" };
     let hair = if physical {
         "        @if(NVF_HAIR)
         if enable_diffuse {
             direct_light += nvf_sss_directional_hair(i, in.N, in.anisotropy_T, in.V, diffuse_color, perceptual_roughness, shadow);
+        }
+"
+    } else {
+        ""
+    };
+    let outfit = if physical {
+        "        @if(NVF_OUTFIT)
+        if enable_diffuse {
+            direct_light += nvf_sss_directional_outfit(i, in.N, in.V, diffuse_color, thickness, shadow);
         }
 "
     } else {
@@ -178,7 +208,7 @@ fn directional_sss_text(physical: bool) -> String {
         if enable_diffuse {{
             direct_light += nvf_sss_directional_foliage(i, in.N, in.V, diffuse_color, nvf_fol_shadow, nvf_display, {p}) * nvf_sss_weight;
         }}
-{hair}"
+{hair}{outfit}"
     )
 }
 

@@ -561,6 +561,7 @@ impl From<&NifSurfaceBlendColour> for NifSurfaceBlendKey {
             eye: false,
             // Hair is never blended into the landscape.
             hair: false,
+            outfit: false,
             // A soft distance, as in the ordinary type's key (NVF_SOFT_FADE, #2868).
             soft: s.soft.x > 0.0,
             // HDR output, as in the ordinary type's key (a live switch prepares both again).

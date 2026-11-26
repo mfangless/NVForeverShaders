@@ -193,6 +193,39 @@ fn hair_strand_shading_composes() {
     assert!(!has_fn(&plain, "hair_strand") && !has_fn(&plain, "nvf_hair_eval"), "no strand shading without NVF_HAIR");
 }
 
+/// Outfit material shading (`NVF_OUTFIT` under `NVF_PHYSICAL_PBR`): Charlie cloth sheen and
+/// per-texel material separation across IBL, ambient occlusion, and first-person arms.
+#[test]
+fn outfit_shading_composes() {
+    let mut compiler = Compiler::with_sss(true);
+    for env_map in [false, true] {
+        for ao in [false, true] {
+            for first_person in [false, true] {
+                let mut defs = vec![
+                    "NVF_OUTFIT",
+                    "NVF_PHYSICAL_PBR",
+                    "VERTEX_UVS",
+                    "VERTEX_UVS_A",
+                    "STANDARD_MATERIAL_BASE_COLOR_TEXTURE",
+                ];
+                if env_map {
+                    defs.push("ENVIRONMENT_MAP");
+                }
+                if ao {
+                    defs.push("NVF_AMBIENT_OCCLUSION");
+                }
+                if first_person {
+                    defs.push("FIRST_PERSON_DEPTH");
+                    defs.push("SHADE_LIGHT");
+                }
+                let compiled = compiler.compile("nvf_assets/nif_material.wesl", &defs);
+                assert!(has_fn(&compiled, "nvf_outfit_sheen_eval"), "{defs:?}: Charlie sheen present");
+                assert_eq!(has_fn(&compiled, "nvf_outfit_sheen_sky"), env_map, "{defs:?}: sky sheen iff ENVIRONMENT_MAP");
+            }
+        }
+    }
+}
+
 /// An eye under SSS (`NVF_EYE`): the iris shift and limbal ring, with the clear coat
 /// Bevy compiles for the cornea, tinted or not, in both lighting modes.
 #[test]

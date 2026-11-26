@@ -248,6 +248,7 @@ mod tests {
                                 ("NVF_SKIN_SSS", false),
                                 ("NVF_FOLIAGE_SSS", false),
                                 ("NVF_HAIR", false),
+                                ("NVF_OUTFIT", false),
                                 ("NVF_AMBIENT_OCCLUSION", ao_on),
                                 ("NVF_SUN_VISIBILITY", sun_on),
                             ],
@@ -263,6 +264,7 @@ mod tests {
                                 ("NVF_SKIN_SSS", true),
                                 ("NVF_FOLIAGE_SSS", false),
                                 ("NVF_HAIR", false),
+                                ("NVF_OUTFIT", false),
                                 ("NVF_AMBIENT_OCCLUSION", ao_on),
                                 ("NVF_SUN_VISIBILITY", sun_on),
                             ],
@@ -295,6 +297,7 @@ mod tests {
                                 ("NVF_SKIN_SSS", false),
                                 ("NVF_FOLIAGE_SSS", true),
                                 ("NVF_HAIR", false),
+                                ("NVF_OUTFIT", false),
                                 ("NVF_AMBIENT_OCCLUSION", ao_on),
                                 ("NVF_SUN_VISIBILITY", sun_on),
                             ],
@@ -319,6 +322,7 @@ mod tests {
                                 ("NVF_SKIN_SSS", false),
                                 ("NVF_FOLIAGE_SSS", false),
                                 ("NVF_HAIR", true),
+                                ("NVF_OUTFIT", false),
                                 ("NVF_AMBIENT_OCCLUSION", ao_on),
                                 ("NVF_SUN_VISIBILITY", sun_on),
                             ],
@@ -337,6 +341,28 @@ mod tests {
                             assert!(zero_at < point_at && f0_zero_at < point_at && point_at < restore_at);
                         } else {
                             assert!(!lighting.contains("nvf_sss_point_hair("), "no strand BSDF in display lighting");
+                        }
+
+                        // Outfit enabled alone: Charlie cloth sheen under physical PBR only.
+                        let outfit = resolve(
+                            &hooked,
+                            &[
+                                ("NVF_SKIN_SSS", false),
+                                ("NVF_FOLIAGE_SSS", false),
+                                ("NVF_HAIR", false),
+                                ("NVF_OUTFIT", true),
+                                ("NVF_AMBIENT_OCCLUSION", ao_on),
+                                ("NVF_SUN_VISIBILITY", sun_on),
+                            ],
+                        );
+                        assert!(balanced(&outfit), "outfit physical={physical} env={env_map} ao={ao_on} sun={sun_on}");
+                        let lighting = block_after(&outfit, "fn nvf_apply_pbr_lighting(");
+                        if physical {
+                            for f in ["nvf_sss_point_outfit(", "nvf_sss_spot_outfit(", "nvf_sss_directional_outfit("] {
+                                assert!(lighting.contains(f), "{f}");
+                            }
+                        } else {
+                            assert!(!lighting.contains("nvf_sss_point_outfit("), "no outfit sheen in display lighting");
                         }
                     }
                 }

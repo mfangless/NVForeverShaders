@@ -1535,6 +1535,165 @@ fn is_foliage_shape(props: &Props, diffuse: Option<&str>, alpha_mode: AlphaMode,
     vanilla_folder || (is_card && (diffuse.is_some_and(is_foliage_texture) || props.foliage_model))
 }
 
+/// Outfit material class packed into `NifSurface::outfit_kind` (`terrain.z` in WGSL).
+pub const OUTFIT_NONE: f32 = 0.0;
+pub const OUTFIT_LEATHER: f32 = 1.0;
+pub const OUTFIT_CLOTH: f32 = 2.0;
+pub const OUTFIT_METAL: f32 = 3.0;
+
+/// Classifies un-authored vanilla armor/clothing shapes by material family (`OUTFIT_*`)
+/// so the physical PBR shader can reinterpret legacy normal-alpha masks into physical
+/// roughness, dielectric/metallic separation, and cloth micro-fiber sheen.
+fn classify_outfit_shape(props: &Props, diffuse: Option<&str>, alpha_mode: AlphaMode, foliage: bool, has_env: bool) -> f32 {
+    if props.skin || props.hair || props.eye || foliage || props.unlit || props.decal || props.lod_building || props.refraction.is_some() {
+        return OUTFIT_NONE;
+    }
+    if !matches!(alpha_mode, AlphaMode::Opaque | AlphaMode::Mask(_)) {
+        return OUTFIT_NONE;
+    }
+    let Some(raw) = diffuse else {
+        return OUTFIT_NONE;
+    };
+    let norm = raw.replace('\\', "/").to_ascii_lowercase();
+    if !contains_any_token(&norm, &["armor/", "clothes/", "clothing/", "outfits/"]) {
+        return OUTFIT_NONE;
+    }
+    if contains_any_token(&norm, &["gore", "meatcap", "pipboy", "glass", "visor", "lens", "goggles", "eyewear", "glasses"]) {
+        return OUTFIT_NONE;
+    }
+    if has_env
+        || contains_any_token(
+            &norm,
+            &[
+                "powerarmor",
+                "metalarmor",
+                "enclave",
+                "tesla",
+                "t45",
+                "t51",
+                "brotherhood",
+                "centurion",
+                "combatarmor",
+                "riotgear",
+                "stealthsuit",
+                "chinesestealth",
+                "spacesuit",
+                "robot",
+            ],
+        )
+    {
+        return OUTFIT_METAL;
+    }
+    if contains_any_token(
+        &norm,
+        &[
+            "leather",
+            "chitin",
+            "gecko",
+            "hide",
+            "boot",
+            "glove",
+            "belt",
+            "saddle",
+            "holster",
+            "raider",
+            "fiend",
+            "viper",
+            "jackal",
+            "scorpion",
+            "biker",
+            "motorcycle",
+            "rubber",
+            "vinyl",
+            "hazmat",
+            "radsuit",
+            "recon",
+        ],
+    ) {
+        return OUTFIT_LEATHER;
+    }
+    if contains_any_token(
+        &norm,
+        &[
+            "vaultsuit",
+            "wasteland",
+            "duster",
+            "coat",
+            "shirt",
+            "suit",
+            "dress",
+            "tunic",
+            "robe",
+            "outfit",
+            "clothes",
+            "republican",
+            "gambler",
+            "prewar",
+            "formal",
+            "doctor",
+            "scientist",
+            "lab",
+            "surgeon",
+            "follower",
+            "king",
+            "powder",
+            "khans",
+            "boom",
+            "trouper",
+            "trooper",
+            "ranger",
+            "merc",
+            "settler",
+            "caravan",
+            "brahmin",
+            "farmer",
+            "prospect",
+            "tribal",
+            "slaver",
+            "underwear",
+            "handwrap",
+            "beanie",
+            "bandana",
+            "scarf",
+            "cap",
+            "hat",
+            "fedora",
+            "beret",
+            "cowboy",
+            "sleepwear",
+            "pajama",
+            "lingerie",
+            "prostitute",
+            "waitress",
+            "bartender",
+            "mechanic",
+            "jumpsuit",
+            "work",
+            "parka",
+            "hood",
+            "cloak",
+            "mantle",
+            "legion",
+            "caesar",
+            "ncr",
+            "veronica",
+            "boone",
+            "cass",
+            "arcade",
+            "benny",
+            "scribe",
+            "elder",
+        ],
+    ) {
+        return OUTFIT_CLOTH;
+    }
+    if !props.specular || props.glossiness.unwrap_or(10.0) <= 12.0 {
+        OUTFIT_CLOTH
+    } else {
+        OUTFIT_LEATHER
+    }
+}
+
 fn find_root(parent: &mut [usize], mut x: usize) -> usize {
     while parent[x] != x {
         parent[x] = parent[parent[x]];
@@ -1914,6 +2073,7 @@ fn shape_material_inner(props: &Props, mesh: &mut Mesh, textures: &mut impl Text
     material.extension.foliage = foliage;
     material.extension.eye = props.eye;
     material.extension.hair = props.hair;
+    material.extension.outfit_kind = classify_outfit_shape(props, diffuse.map(String::as_str), alpha_mode, foliage, material.extension.env_cube.is_some());
     // An eye under SSS: a wet cornea over the iris and white, a clear coat as smooth as
     // a tear film (Bevy's Filament clear coat; its F0 is 0.04, a cornea's about 0.025
     // [hypothesis: IOR 1.376]), which gives the eye its sharp highlight of the sun and
@@ -4101,5 +4261,47 @@ mod bc5_material_tests {
             };
             assert_eq!(props_cull(&props), expected, "load-time props_cull must match stencil_cull for mode {mode}");
         }
+    }
+
+    #[test]
+    fn classify_outfit_maps_armor_and_cloth_families_and_excludes_non_outfits() {
+        let base = Props { specular: true, glossiness: Some(25.0), ..Default::default() };
+        assert_eq!(
+            classify_outfit_shape(&base, Some(r"textures\armor\leatherarmor\leatherarmorf.dds"), AlphaMode::Opaque, false, false),
+            OUTFIT_LEATHER
+        );
+        assert_eq!(
+            classify_outfit_shape(&base, Some(r"textures\armor\vaultsuit\vaultsuit21f.dds"), AlphaMode::Opaque, false, false),
+            OUTFIT_CLOTH
+        );
+        assert_eq!(
+            classify_outfit_shape(&base, Some(r"textures\armor\powerarmor\powerarmort45d.dds"), AlphaMode::Opaque, false, false),
+            OUTFIT_METAL
+        );
+        assert_eq!(
+            classify_outfit_shape(&base, Some(r"textures\armor\custom\something.dds"), AlphaMode::Opaque, false, true),
+            OUTFIT_METAL
+        );
+        // Exclusions: skin, hair, eye, pipboy, visor/glass, blended effects, non-armor meshes.
+        assert_eq!(
+            classify_outfit_shape(&Props { skin: true, ..base.clone() }, Some(r"textures\armor\leatherarmor\leatherarmorf.dds"), AlphaMode::Opaque, false, false),
+            OUTFIT_NONE
+        );
+        assert_eq!(
+            classify_outfit_shape(&Props { hair: true, ..base.clone() }, Some(r"textures\armor\headgear\wig.dds"), AlphaMode::Opaque, false, false),
+            OUTFIT_NONE
+        );
+        assert_eq!(
+            classify_outfit_shape(&base, Some(r"textures\armor\headgear\visor.dds"), AlphaMode::Opaque, false, false),
+            OUTFIT_NONE
+        );
+        assert_eq!(
+            classify_outfit_shape(&base, Some(r"textures\armor\leatherarmor\leatherarmorf.dds"), AlphaMode::Blend, false, false),
+            OUTFIT_NONE
+        );
+        assert_eq!(
+            classify_outfit_shape(&base, Some(r"textures\architecture\goodsprings\wood.dds"), AlphaMode::Opaque, false, false),
+            OUTFIT_NONE
+        );
     }
 }
