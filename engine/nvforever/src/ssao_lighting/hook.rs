@@ -46,6 +46,14 @@ pub const LAMP_TEXT: &str = "    // NVForever ambient occlusion (nvforever ssao_
     let nvf_ao_ambient = 1.0;
     @if(NVF_AMBIENT_OCCLUSION)
     let nvf_ao_lamps = nvf_ao_multibounce(nvf_lamp_visibility(nvf_ao_ambient), diffuse_color);
+    // And the factor on lamps whose shadow is looked up here: a share of it.
+    @if(NVF_AMBIENT_OCCLUSION)
+    let nvf_ao_shadowed = nvf_shadowed_lamp_visibility(nvf_ao_lamps);
+    // The factor on the lamps' highlights, and its share for lamps whose shadow is looked up.
+    @if(NVF_AMBIENT_OCCLUSION)
+    let nvf_ao_spec = nvf_specular_visibility(nvf_ao_ambient, NdotV, roughness);
+    @if(NVF_AMBIENT_OCCLUSION)
+    let nvf_ao_spec_shadowed = nvf_shadowed_lamp_visibility(vec3(nvf_ao_spec)).x;
 
 ";
 
@@ -55,13 +63,19 @@ pub const POINT_LINE: &str = "        if nvf_display { nvf_direct += nvf_point_d
 /// The same kept without the def, and its twin taking the lamps' factor where the light's
 /// shadow is not looked up for this fragment (the light casts none, or the surface receives
 /// none: exactly the condition under which bevy_pbr leaves `shadow` at 1 above). Lights with
-/// a shadow (the Pip-Boy light, flashlight.rs) are left as they are: their shadow already
-/// keeps their light out of creases.
+/// a shadow (the Pip-Boy light, flashlight.rs, the ALC shadows row's lamps) take a share of the
+/// factor: their shadow already keeps their light out of the way of what blocks it, but not
+/// out of the creases a shadow map does not resolve (`nvf_ao_shadowed`, ssao_lighting.rs
+/// `SHADOWED_LAMPS`; until 2026-11-24 they took none).
 pub const POINT_LINE_HOOKED: &str = "        @if(!NVF_AMBIENT_OCCLUSION)
         if nvf_display { nvf_direct += nvf_point_display(light_id, in.world_position.xyz, in.N) * shadow; }
         // NVForever ambient occlusion (nvforever ssao_lighting.rs): lamps without a shadow here.
         @if(NVF_AMBIENT_OCCLUSION)
-        if nvf_display { nvf_direct += nvf_point_display(light_id, in.world_position.xyz, in.N) * shadow * select(nvf_ao_lamps, vec3(1.0), (in.flags & MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u && (view_bindings::clustered_lights.data[light_id].flags & mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u); }
+        if nvf_display { nvf_direct += nvf_point_display(light_id, in.world_position.xyz, in.N) * shadow * select(nvf_ao_lamps, nvf_ao_shadowed, (in.flags & MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u && (view_bindings::clustered_lights.data[light_id].flags & mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u); }
+        // The lamp's highlight (Bevy's `direct_light` holds only that in a world view) by the
+        // highlights' factor: what the line above added without it is taken back.
+        @if(NVF_AMBIENT_OCCLUSION)
+        if nvf_display { direct_light -= light_contrib * (shadow * (1.0 - select(nvf_ao_spec, nvf_ao_spec_shadowed, (in.flags & MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u && (view_bindings::clustered_lights.data[light_id].flags & mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u))); }
 ";
 
 /// A spot light's part of the display-value sum.
@@ -72,7 +86,11 @@ pub const SPOT_LINE_HOOKED: &str = "        @if(!NVF_AMBIENT_OCCLUSION)
         if nvf_display { nvf_direct += nvf_spot_display(light_id, in.world_position.xyz, in.N) * shadow; }
         // NVForever ambient occlusion (nvforever ssao_lighting.rs): lamps without a shadow here.
         @if(NVF_AMBIENT_OCCLUSION)
-        if nvf_display { nvf_direct += nvf_spot_display(light_id, in.world_position.xyz, in.N) * shadow * select(nvf_ao_lamps, vec3(1.0), (in.flags & MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u && (view_bindings::clustered_lights.data[light_id].flags & mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u); }
+        if nvf_display { nvf_direct += nvf_spot_display(light_id, in.world_position.xyz, in.N) * shadow * select(nvf_ao_lamps, nvf_ao_shadowed, (in.flags & MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u && (view_bindings::clustered_lights.data[light_id].flags & mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u); }
+        // The lamp's highlight (Bevy's `direct_light` holds only that in a world view) by the
+        // highlights' factor: what the line above added without it is taken back.
+        @if(NVF_AMBIENT_OCCLUSION)
+        if nvf_display { direct_light -= light_contrib * (shadow * (1.0 - select(nvf_ao_spec, nvf_ao_spec_shadowed, (in.flags & MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u && (view_bindings::clustered_lights.data[light_id].flags & mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u))); }
 ";
 
 /// The end of `main_pass_post_lighting_processing`: after the fog, the tonemapping in the
@@ -117,7 +135,7 @@ pub const HOOK_EDITS: [(&str, &str, Place); 6] = [
     (
         "import bevy_render::maths::{E, powsafe};\n",
         "// NVForever ambient occlusion (nvforever ssao_lighting.rs).
-@if(NVF_AMBIENT_OCCLUSION) import nvforever::ssao_lighting::{nvf_ambient_visibility, nvf_ao_debug, nvf_ao_multibounce, nvf_lamp_visibility};
+@if(NVF_AMBIENT_OCCLUSION) import nvforever::ssao_lighting::{nvf_ambient_visibility, nvf_ao_debug, nvf_ao_multibounce, nvf_lamp_visibility, nvf_shadowed_lamp_visibility, nvf_specular_visibility};
 ",
         Place::After,
     ),
@@ -207,15 +225,15 @@ pub const PHYSICAL_IBL_AO_HOOKED: &str = "    @if(!NVF_AMBIENT_OCCLUSION)
 ";
 
 /// The fallback linear ambient line of `lights/display_shader.rs` `PHYSICAL_EDITS`.
-pub const PHYSICAL_AMBIENT_LINE: &str = "            let nvf_ambient_lin = nvf_srgb_to_linear_hdr(view_bindings::lights.ambient_color.rgb * view_bindings::view.exposure) * diffuse_occlusion; // nvf_physical_fallback_ambient\n";
+pub const PHYSICAL_AMBIENT_LINE: &str = "            let nvf_ambient_lin = lighting::nvf_srgb_to_linear_hdr(view_bindings::lights.ambient_color.rgb * view_bindings::view.exposure) * diffuse_occlusion; // nvf_physical_fallback_ambient\n";
 
 /// Linear ambient kept without the def, and scaled by the multi-bounce occlusion fit and architectural sky-visibility with it.
 pub const PHYSICAL_AMBIENT_LINE_HOOKED: &str = "            // NVForever ambient occlusion (nvforever ssao_lighting.rs): on the fallback linear
             // ambient alone, never on direct directional lights nor on Bevy's ambient highlight.
             @if(!NVF_AMBIENT_OCCLUSION)
-            let nvf_ambient_lin = nvf_srgb_to_linear_hdr(view_bindings::lights.ambient_color.rgb * view_bindings::view.exposure) * diffuse_occlusion; // nvf_physical_fallback_ambient
+            let nvf_ambient_lin = lighting::nvf_srgb_to_linear_hdr(view_bindings::lights.ambient_color.rgb * view_bindings::view.exposure) * diffuse_occlusion; // nvf_physical_fallback_ambient
             @if(NVF_AMBIENT_OCCLUSION)
-            let nvf_ambient_lin = nvf_srgb_to_linear_hdr(view_bindings::lights.ambient_color.rgb * view_bindings::view.exposure) * diffuse_occlusion * nvf_ao_diffuse(nvf_ao_ambient * mix(0.28, 1.0, clamp(nvf_sky_vis, 0.0, 1.0)), diffuse_color, nvf_ao_skin);
+            let nvf_ambient_lin = lighting::nvf_srgb_to_linear_hdr(view_bindings::lights.ambient_color.rgb * view_bindings::view.exposure) * diffuse_occlusion * nvf_ao_diffuse(nvf_ao_ambient * mix(0.28, 1.0, clamp(nvf_sky_vis, 0.0, 1.0)), diffuse_color, nvf_ao_skin);
 ";
 
 /// The ambient occlusion hook in `apply_pbr_lighting` for the physical PBR patch

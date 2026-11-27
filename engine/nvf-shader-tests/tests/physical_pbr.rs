@@ -178,3 +178,27 @@ fn blend_multiply_decals_attenuate_with_fog_transmittance() {
         }
     }
 }
+
+/// Physical lighting with authored reflections: the gated light loop compiles for an authored
+/// material (NVF_PBR_REFLECT, the cube) and any other (the flat ambient), with and without
+/// an environment map in the view.
+#[test]
+fn the_gated_physical_light_loop_compiles_with_and_without_the_opt_in() {
+    let mut compiler = support::Compiler::with_physical_pbr_and_gate();
+    for reflect in [false, true] {
+        for env_map in [false, true] {
+            let mut defs = vec!["NVF_PHYSICAL_PBR", "DISTANCE_FOG"];
+            if env_map {
+                defs.push("ENVIRONMENT_MAP");
+            }
+            if reflect {
+                defs.push("NVF_PBR_REFLECT");
+            }
+            let compiled = compiler.compile("nvf_assets/nif_material.wesl", &defs);
+            assert!(
+                compiled.module.entry_points.iter().any(|e| e.stage == naga::ShaderStage::Fragment),
+                "{defs:?}: a fragment entry point"
+            );
+        }
+    }
+}

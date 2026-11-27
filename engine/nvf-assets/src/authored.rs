@@ -738,10 +738,10 @@ pub fn key_eligible(key: &str) -> bool {
 /// no effect: no reflection source, docs/spec-notes/pbr-materials.md "Metallic"), or 1 in the
 /// metallic channel view ([`PbrView::Metallic`]), so the material's sample of the blue
 /// channel is the per-texel value the view shows, under the metallic debug switch
-/// ([`metallic_debug`]), so the blue channel takes effect, with reflections on
-/// (`reflection_cube::enabled`) where nif_material.wesl holds the sampled value at 0 in every
-/// view without a reflection cube, or under physical PBR ([`physical_pbr`]), where
-/// `PhysicalIblPlugin` supplies sky/environment IBL.
+/// ([`metallic_debug`]), so the blue channel takes effect, and with reflections on
+/// (`reflection_cube::enabled`), where nif_material.wesl holds the sampled value at 0 in every
+/// view without a reflection cube, so only a view with one shades a metal as a metal; and
+/// under Physical lighting ([`physical_pbr`]), whose sky image-based light every view has.
 pub fn authored_metallic() -> f32 {
     if view() == PbrView::Metallic || metallic_debug() || crate::reflection_cube::enabled() || physical_pbr() { 1.0 } else { 0.0 }
 }
@@ -772,33 +772,6 @@ pub fn metallic_debug() -> bool {
 
 /// The environment variable of the physical PBR switch ([`physical_pbr`]).
 pub const PHYSICAL_PBR_ENV: &str = "NVF_PHYSICAL_PBR";
-
-static PHYSICAL_PBR: OnceLock<bool> = OnceLock::new();
-
-/// Fix the run's state of the physical PBR switch before shader hooks and IBL initialise.
-pub fn set_physical_pbr(on: bool) {
-    if PHYSICAL_PBR.set(on).is_err() && physical_pbr() != on {
-        warn!("physical PBR: already {} for this run; the setting takes effect at the next start", if physical_pbr() { "on" } else { "off" });
-    }
-}
-
-/// The physical PBR lighting switch (off by default; `NVF_PHYSICAL_PBR=1`, read once at the
-/// start): swaps `Fd_Burley` for the active physical diffuse model ([`DiffuseModel`],
-/// `NVF_DIFFUSE`), restores full Cook-Torrance GGX Schlick Fresnel in world views,
-/// replaces the display-value diffuse bypass with linear diffuse + ambient lighting, and
-/// keeps Tony McMapface tonemapping active.
-pub fn physical_pbr() -> bool {
-    *PHYSICAL_PBR.get_or_init(|| {
-        let on = std::env::var(PHYSICAL_PBR_ENV).is_ok_and(|v| v.trim() == "1");
-        if on {
-            info!(
-                "authored materials: physical PBR switch ({PHYSICAL_PBR_ENV}=1): linear {} diffuse + Cook-Torrance GGX specular with full Schlick Fresnel",
-                diffuse_model().name()
-            );
-        }
-        on
-    })
-}
 
 /// The environment variable of the physical diffuse model switch ([`diffuse_model`]).
 pub const DIFFUSE_ENV: &str = "NVF_DIFFUSE";
@@ -1601,6 +1574,28 @@ pub(crate) fn srgb_warning(memo: &Memo, path: &str, usage: TextureUsage, srgb_co
     if srgb_code && usage != TextureUsage::Color && path.starts_with(fnv_pbr::PBR_DIR) {
         memo.warn_once(path, || format!("authored materials: {path} names an sRGB format in its DX10 header; it is read as linear data, as its role is"));
     }
+}
+
+
+/// The run's Physical PBR lighting state (the settings row `physical-pbr`, nvforever
+/// graphics.rs; docs/design/graphics-enhanced.md §3.25), fixed before the first shader hook
+/// and material: off unless the start set it ([`set_physical_pbr`]).
+static PHYSICAL_PBR: OnceLock<bool> = OnceLock::new();
+
+/// Fix the run's Physical PBR state before the first shader hook and material are made. A
+/// later call with another value is logged and ignored: the row takes effect at the next
+/// start.
+pub fn set_physical_pbr(on: bool) {
+    if PHYSICAL_PBR.set(on).is_err() && physical_pbr() != on {
+        warn!("physical PBR: already {} for this run; the setting takes effect at the next start", if physical_pbr() { "on" } else { "off" });
+    }
+}
+
+/// Whether this run lights the world physically (Oren-Nayar diffuse and Cook-Torrance GGX
+/// specular with Schlick Fresnel, image-based light from the sky, linear fog and exposure)
+/// in place of the display-value lighting sum. Off unless [`set_physical_pbr`] said so.
+pub fn physical_pbr() -> bool {
+    *PHYSICAL_PBR.get_or_init(|| false)
 }
 
 #[cfg(test)]

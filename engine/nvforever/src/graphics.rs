@@ -556,8 +556,8 @@ impl Graphics {
             (self.volumetric_light, "volumetric light"),
             (self.aerial_perspective, "aerial perspective"),
             (self.night_sky_detail, "night sky detail"),
-            (self.distant_lights, "distant lights"),
             (self.physical_pbr, "physical PBR lighting"),
+            (self.distant_lights, "distant lights"),
             (self.subsurface_scattering, "subsurface scattering"),
             (self.ssgi, "screen-space global illumination"),
         ];
@@ -1131,11 +1131,7 @@ fn apply(
         }
         // FSR already runs its own RCAS sharpening; do not sharpen the picture twice.
         if g.bloom || (g.sharpen && fsr.is_none()) {
-            e.insert(PostEffects::new_with_hdr_glow(
-                g.bloom,
-                g.sharpen && fsr.is_none(),
-                nvf_assets::authored::physical_pbr() && g.glow,
-            ));
+            e.insert(PostEffects::new_with_hdr_glow(g.bloom, g.sharpen && fsr.is_none(), nvf_assets::authored::physical_pbr() && g.glow));
         } else {
             e.remove::<PostEffects>();
         }

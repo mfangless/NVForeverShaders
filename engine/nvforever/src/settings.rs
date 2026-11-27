@@ -1240,14 +1240,6 @@ fn register_graphics(app: &mut App) {
             |w, on| w.resource_mut::<Graphics>().neon_glow = on,
         ),
         (
-            crate::graphics::PHYSICAL_PBR_KEY,
-            "Physical PBR lighting",
-            PHYSICAL_PBR_NOTE,
-            PHYSICAL_PBR_SWITCHES,
-            |w| w.resource::<Graphics>().physical_pbr,
-            |w, on| w.resource_mut::<Graphics>().physical_pbr = on,
-        ),
-        (
             crate::graphics::SUBSURFACE_SCATTERING_KEY,
             "Subsurface scattering",
             SUBSURFACE_SCATTERING_NOTE,
@@ -1378,6 +1370,14 @@ fn register_graphics(app: &mut App) {
             |w, on| w.resource_mut::<Graphics>().night_sky_detail = on,
         ),
         (
+            "physical-pbr",
+            "Physical lighting (experimental)",
+            PHYSICAL_PBR_NOTE,
+            "--graphics-only",
+            |w| w.resource::<Graphics>().physical_pbr,
+            |w, on| w.resource_mut::<Graphics>().physical_pbr = on,
+        ),
+        (
             "distant-lights",
             "Distant lights (experimental)",
             "On: at night, lamps in the places beyond the loaded area show as small glows, so towns can be seen from afar. They light nothing. Not in the original.",
@@ -1459,7 +1459,7 @@ pub(crate) const VOLUMETRIC_LIGHT_STRENGTH_KEY: &str = "volumetric-light-strengt
 
 /// The Volumetric light row's note: what it does and what it looks best with (its rays are
 /// cut by the Cloud shadows image and the Terrain shadows map, medium_air_grid.rs) [design].
-pub(crate) const VOLUMETRIC_LIGHT_NOTE: &str = "On: sunlight and moonlight show in the air as rays and a glow toward a low sun, shaded by hills and clouds. Best with Cloud shadows and Terrain shadows on. An addition of NVForever's.";
+pub(crate) const VOLUMETRIC_LIGHT_NOTE: &str = "On: sunlight and moonlight show in the air as rays and a glow toward a low sun. An addition of NVForever's.";
 
 /// The strength slider's note [design].
 pub(crate) const VOLUMETRIC_LIGHT_STRENGTH_NOTE: &str = "How strongly the light in the air brightens lit air and darkens shaded air: 100% is the look as tuned, 0% none.";
@@ -1508,7 +1508,7 @@ pub(crate) const PARALLAX_RESTART: &str = "After a restart (Authored Materials)"
 
 /// The Authored materials row's note (#2981): it takes effect at the next start, as the run's
 /// state is fixed before the first material (main.rs).
-pub(crate) const AUTHORED_MATERIALS_NOTE: &str = "On: surfaces whose textures a texture pack gives material maps for (textures\\pbr\\) are shaded from them. Off: every surface uses the game's own values. Takes effect at the next start.";
+pub(crate) const AUTHORED_MATERIALS_NOTE: &str = "On: a material pack's maps (textures\\pbr\\) shade its surfaces. Off: the game's own values. Takes effect at the next start.";
 
 /// The command-line switches the Authored materials row weighs against the INI at the start
 /// (`authored_after_ini`).
@@ -1526,8 +1526,22 @@ pub(crate) fn authored_after_ini(command_line: bool, given: Option<&nvf_play::se
     nvf_play::settings::switch_after_ini(command_line, stored, given, AUTHORED_MATERIALS_SWITCHES)
 }
 
-pub(crate) const PHYSICAL_PBR_NOTE: &str = "On: linear rough diffuse, Cook-Torrance specular, sky IBL and Beer-Lambert fog instead of the original's display lighting. Takes effect at the next start.";
-pub(crate) const PHYSICAL_PBR_SWITCHES: &str = "--graphics-only";
+/// The Physical lighting row's note (graphics-enhanced.md §3.25).
+const PHYSICAL_PBR_NOTE: &str = "On: light, sky, fog and exposure follow physical rules instead of the original's display values. Still being tuned. Takes effect at the next start. Not in the original.";
+
+/// The run's Physical PBR lighting state, decided before the first shader hook and material
+/// by [`authored_after_ini`]'s rule: the command line's (`--graphics-only physical-pbr`),
+/// then the INI's stored row. In a build with the developer aids (dev_aids.rs),
+/// `NVF_PHYSICAL_PBR=1` or `0` overrides both, for comparing.
+pub(crate) fn physical_pbr_after_ini(command_line: bool, given: Option<&nvf_play::settings::GivenSwitches>) -> bool {
+    if let Some(v) = crate::dev_aids::var("NVF_PHYSICAL_PBR") {
+        return v.trim() == "1";
+    }
+    let Some(given) = given else { return command_line };
+    let stored = stored_at_start("physical-pbr").and_then(|v| nvf_play::settings::parse_switch(&v));
+    nvf_play::settings::switch_after_ini(command_line, stored, given, "--graphics-only")
+}
+
 pub(crate) const DIFFUSE_MODEL_NOTE: &str = "How surfaces scatter direct light under Physical PBR: Oren-Nayar (EON), Chan (GGX multiscatter) or flat Lambert. Applies live without a restart.";
 pub(crate) const DIFFUSE_NEEDS: &str = "Needs Physical PBR Lighting.";
 pub(crate) const DIFFUSE_RESTART: &str = "After a restart (Physical PBR Lighting)";
@@ -1603,15 +1617,6 @@ fn env_or_ini_switch(
     }
 }
 
-/// Resolve `physical-pbr` at startup: `NVF_PHYSICAL_PBR` env var overrides, otherwise INI/CLI precedence.
-pub(crate) fn physical_pbr_after_ini(command_line: bool, given: Option<&nvf_play::settings::GivenSwitches>) -> bool {
-    let env_val = std::env::var(nvf_assets::authored::PHYSICAL_PBR_ENV).ok();
-    let stored = given
-        .and_then(|_| stored_at_start(crate::graphics::PHYSICAL_PBR_KEY))
-        .and_then(|v| nvf_play::settings::parse_switch(&v));
-    env_or_ini_switch(env_val.as_deref(), command_line, stored, given, PHYSICAL_PBR_SWITCHES)
-}
-
 /// Resolve `subsurface-scattering` at startup: `NVF_SSS` env var overrides, otherwise INI/CLI precedence.
 pub(crate) fn sss_after_ini(command_line: bool, given: Option<&nvf_play::settings::GivenSwitches>) -> bool {
     let env_val = std::env::var(nvf_assets::authored::SSS_ENV).ok();
@@ -1623,7 +1628,7 @@ pub(crate) fn sss_after_ini(command_line: bool, given: Option<&nvf_play::setting
 
 /// The Reflections on authored materials row's note (#2981 reflections): it needs a pack and
 /// Authored materials, and takes effect at the next start (main.rs).
-pub(crate) const AUTHORED_REFLECTIONS_NOTE: &str = "On: pack materials reflect the sky outdoors and an approximation of the room and nearby lights indoors. Needs a material pack and Authored materials on. Takes effect at the next start.";
+pub(crate) const AUTHORED_REFLECTIONS_NOTE: &str = "On: pack materials reflect the sky outside and nearby lights inside. Needs Authored materials on. Takes effect at the next start.";
 
 /// The run's Reflections on authored materials state (#2981 reflections), decided before the
 /// first NIF pipeline by [`authored_after_ini`]'s rule: the command line's
@@ -1668,7 +1673,7 @@ fn take_ao(world: &mut World, text: &str) -> bool {
 
 /// The Volumetric clouds row's key and note (volumetric_clouds.rs `CloudLevel`).
 const CLOUDS_KEY: &str = "volumetric-clouds";
-const CLOUDS_NOTE: &str = "The weather's clouds drawn with depth, lit by the sun: Off, or Performance, Normal or High, each finer and dearer than the last. A prototype. Not in the original.";
+const CLOUDS_NOTE: &str = "The weather's clouds drawn with depth and lit by the sun: Off, or Performance, Normal or High. A prototype. Not in the original.";
 
 /// The Volumetric clouds row's choice now: Off, or the level the clouds are drawn at.
 fn clouds_chosen(world: &World) -> String {
@@ -1980,7 +1985,7 @@ fn take_shadow_resolution(w: &mut World, text: &str) -> bool {
 
 /// The ALC shadows row's note (light_shadows.rs; ALC: All Lights Cast, the user-visible
 /// name since 2026-11-19, once Lamp shadows; the INI key stays `light-shadows`).
-const LIGHT_SHADOWS_NOTE: &str = "ALC (All Lights Cast): lamps, fires and spot lights cast shadows within the shadow distance, so walls stop their light. Performance redraws less often. Costs frame rate. Not in the original.";
+const LIGHT_SHADOWS_NOTE: &str = "ALC (All Lights Cast): lamps, fires and spot lights cast shadows in the shadow distance; Performance redraws less often. Costs frame rate. Not in the original.";
 
 fn light_shadows_chosen(w: &World) -> String {
     let choice = w.get_resource::<crate::light_shadows::LightShadows>().map_or(0, |l| l.choice);
@@ -3316,7 +3321,6 @@ dlss-model=Preset K
             ("glow", &["--graphics-only"]),
             ("eye-adaptation", &["--graphics-only"]),
             ("neon-glow", &["--graphics-only"]),
-            (crate::graphics::PHYSICAL_PBR_KEY, &["--graphics-only"]),
             (crate::graphics::SUBSURFACE_SCATTERING_KEY, &["--graphics-only"]),
             (crate::graphics::SSGI_KEY, &["--graphics-only"]),
             ("sharpen", &["--graphics"]),
@@ -3332,6 +3336,7 @@ dlss-model=Preset K
             ("volumetric-clouds", &["--graphics-only"]),
             ("aerial-perspective", &["--graphics", "--graphics-only"]),
             ("night-sky-detail", &["--graphics", "--graphics-only"]),
+            ("physical-pbr", &["--graphics-only"]),
             ("distant-lights", &["--graphics", "--graphics-only"]),
             (VOLUMETRIC_LIGHT_KEY, &["--graphics-only"]),
             (VOLUMETRIC_LIGHT_STRENGTH_KEY, &[]),
@@ -3492,7 +3497,7 @@ dlss-model=Preset K
     fn physical_pbr_and_sss_rows_persist_in_ini_and_respect_env_precedence() {
         let mut app = rows_app();
         for (key, label, note) in [
-            (crate::graphics::PHYSICAL_PBR_KEY, "Physical PBR lighting", PHYSICAL_PBR_NOTE),
+            (crate::graphics::PHYSICAL_PBR_KEY, "Physical lighting (experimental)", PHYSICAL_PBR_NOTE),
             (crate::graphics::SUBSURFACE_SCATTERING_KEY, "Subsurface scattering", SUBSURFACE_SCATTERING_NOTE),
             (crate::graphics::SSGI_KEY, "Screen-space global illumination", SSGI_NOTE),
             (crate::graphics::GRASS_SHADOWS_KEY, "Grass shadows", GRASS_SHADOWS_NOTE),

@@ -229,6 +229,6 @@ mod tests {
         }
         assert!(bake(&mut concave));
         let Some(VertexAttributeValues::Float32x2(uv)) = concave.attribute(Mesh::ATTRIBUTE_UV_1) else { panic!("no UV_1") };
-        assert!(uv.iter().all(|c| c[0] > 0.0 && c[1] > 0.0), "inward sphere has positive concavity: {:?}", &uv[0]);
+        assert!(uv.iter().all(|c| c[0] > 0.0 && c[1] > 0.0), "inward sphere has positive concavity: {:?}", uv[0]);
     }
 }

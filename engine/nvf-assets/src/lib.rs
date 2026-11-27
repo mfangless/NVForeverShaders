@@ -29,6 +29,7 @@ pub mod skin_curvature;
 pub mod tangents;
 pub mod terrain_sampling;
 pub mod texture;
+pub mod tone_input;
 
 pub use data::{ArchivePlugin, GameData};
 pub use particles::{ParticleSystemDef, PreparedParticles};

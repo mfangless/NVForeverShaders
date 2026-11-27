@@ -87,10 +87,11 @@ import bevy_pbr::{
     render::mesh_view_types::FOG_MODE_ATMOSPHERIC,
     render::view_transformations::{position_ndc_to_world, depth_ndc_to_view_z},
 };
-@if(!PREPASS_PIPELINE && BLEND_MULTIPLY && DISTANCE_FOG) import bevy_pbr::render::pbr_functions::apply_fog;
+@if(!PREPASS_PIPELINE && BLEND_MULTIPLY && DISTANCE_FOG && NVF_PHYSICAL_PBR) import bevy_pbr::render::pbr_functions::apply_fog;
 @if(!PREPASS_PIPELINE && DEPTH_PREPASS) import bevy_pbr::prepass::utils as prepass_utils;
 @if(!PREPASS_PIPELINE) import bevy_pbr::render::mesh_functions::get_world_from_local;
 @if(!PREPASS_PIPELINE) import nvf_assets::first_person_depth;
+@if(!PREPASS_PIPELINE) import nvf_assets::tone_input::tony_inverse_each;
 @if(!PREPASS_PIPELINE && SHADE_LIGHT) import bevy_pbr::{
     render::pbr_types::PbrInput,
     render::mesh_types::{MESH_FLAGS_SHADOW_RECEIVER_BIT, NVF_MESH_FLAGS_NO_DIRECTIONAL_SHADOWS_BIT},
@@ -174,6 +175,30 @@ import nvf_assets::nif_surface_bindings::{NifSurface, nif_surface, standard_mate
         sum += lights.directional_lights[i].color.rgb * (view.exposure / 3.14159265);
     }
     return clamp(sum, vec3(0.0), vec3(1.0));
+}
+
+// The direction the cube is read in (env_map.rs `lookup`, its CPU mirror): the view reflected
+// about the interpolated normal (`mark` 2) or the shading normal (1), turned as `axes` says
+// (env_map.rs Axes). Which side the normal faces does not matter: reflect(I, N) is
+// reflect(I, -N). An interpolated normal of no length (a vertex stores none, or opposing ones
+// meet) falls back to the view direction, so nothing that is not finite is sampled.
+@if(!PREPASS_PIPELINE && !NIF_SURFACE_BLEND) fn env_lookup(v: vec3<f32>, shading: vec3<f32>, interpolated: vec3<f32>, axes: f32, mark: f32) -> vec3<f32> {
+    var n = shading;
+    if mark > 1.5 {
+        let squared = dot(interpolated, interpolated);
+        n = select(v, interpolated * inverseSqrt(max(squared, 1e-12)), squared > 1e-12);
+    }
+    let r = reflect(-v, n);
+    if axes > 3.5 {
+        return vec3(r.x, -r.z, r.y);
+    } else if axes > 2.5 {
+        return vec3(r.x, r.y, r.z);
+    } else if axes > 1.5 {
+        return vec3(r.x, -r.y, -r.z);
+    } else if axes > 0.5 {
+        return vec3(-r.x, r.y, -r.z);
+    }
+    return vec3(r.x, r.y, -r.z);
 }
 
 // Main-pass geometry uses the render viewport, which can be smaller than the
@@ -316,19 +341,6 @@ fn multiply_factor(lit: vec3<f32>, emissive: vec3<f32>) -> vec3<f32> {
 // tonemapper it lands where clipping would put it. Lit surfaces without emitted light
 // keep the tonemapper [hypothesis from the original's frames of Dead Money's lantern].
 const HOT_MAX: f32 = 0.95;
-const TONY_N: u32 = 24u;
-var<private> TONY_IN: array<f32, 24> = array<f32, 24>(0.0, 0.005, 0.01, 0.02, 0.04, 0.07, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0, 1.3, 1.7, 2.2, 3.0, 5.0, 8.0, 16.0, 40.0, 100.0);
-var<private> TONY_OUT: array<f32, 24> = array<f32, 24>(0.0, 0.0056, 0.0113, 0.0222, 0.0437, 0.0723, 0.0999, 0.1470, 0.1812, 0.2542, 0.3140, 0.3663, 0.4125, 0.4910, 0.5457, 0.6172, 0.6867, 0.7454, 0.8070, 0.8796, 0.9216, 0.9473, 0.9771, 0.9875);
-
-fn tony_inverse(y: f32) -> f32 {
-    for (var i = 1u; i < TONY_N; i++) {
-        if y <= TONY_OUT[i] {
-            let t = (y - TONY_OUT[i - 1u]) / max(TONY_OUT[i] - TONY_OUT[i - 1u], 1e-6);
-            return mix(TONY_IN[i - 1u], TONY_IN[i], t);
-        }
-    }
-    return TONY_IN[TONY_N - 1u];
-}
 
 // `lit` plus the emitted light `e` as a hot source: held per channel, mapped through
 // the inverse response. Only light that goes past white is a hot source: blended in as
@@ -343,7 +355,7 @@ fn hot_light(lit: vec3<f32>, e: vec3<f32>) -> vec3<f32> {
     var out = lit + e;
     if hot_share > 0.0 {
         let d = min(lit + e, vec3(HOT_MAX));
-        let hot = vec3(tony_inverse(d.r), tony_inverse(d.g), tony_inverse(d.b));
+        let hot = tony_inverse_each(d);
         out = mix(lit + e, hot, hot_share);
     }
     // HDR output (nvforever hdr.rs): the SDR picture up to white, and above white the light
@@ -505,6 +517,18 @@ const BODY_CLEARANCE: f32 = 24.0;
     return cascade;
 }
 
+// The sRGB transfer both ways, held at 0 below, as the display-value sum uses it
+// (nvforever lights/display_shader.rs `nvf_linear_to_display`, `nvf_display_to_linear`).
+@if(!PREPASS_PIPELINE && SHADE_LIGHT) fn shade_display(c: vec3<f32>) -> vec3<f32> {
+    let x = max(c, vec3(0.0));
+    return select(1.055 * pow(x, vec3(1.0 / 2.4)) - 0.055, x * 12.92, x <= vec3(0.0031308));
+}
+
+@if(!PREPASS_PIPELINE && SHADE_LIGHT) fn shade_linear(c: vec3<f32>) -> vec3<f32> {
+    let x = max(c, vec3(0.0));
+    return select(pow((x + 0.055) / 1.055, vec3(2.4)), x / 12.92, x <= vec3(0.04045));
+}
+
 @if(!PREPASS_PIPELINE && SHADE_LIGHT) fn with_shade_light(in: PbrInput, shadowed: vec4<f32>) -> vec4<f32> {
     if (in.flags & MESH_FLAGS_SHADOW_RECEIVER_BIT) == 0u {
         return shadowed;
@@ -565,13 +589,16 @@ const BODY_CLEARANCE: f32 = 24.0;
     @if(!NVF_PHYSICAL_PBR)
     if lights.ambient_color.a < 0.0 {
         // The display-value sum (nvforever lights.rs DISPLAY_HELPERS): the diffuse light is
-        // texture × sum^2.2, so its display value (^(1/2.2)) is linear in the shadow
-        // values; the same algebra there (the specular part is taken along).
-        let lit_d = pow(max(lit.rgb, vec3(0.0)), vec3(1.0 / 2.2));
-        let shadowed_d = pow(max(shadowed.rgb, vec3(0.0)), vec3(1.0 / 2.2));
-        return vec4(pow(max(lit_d - (lit_d - shadowed_d) * k, vec3(0.0)), vec3(2.2)), shadowed.a);
+        // the linear colour of the texture's display value × the sum (sRGB curve), so its
+        // display value is linear in the shadow values; the same algebra there (the
+        // specular part is taken along).
+        let lit_d = shade_display(lit.rgb);
+        let shadowed_d = shade_display(shadowed.rgb);
+        return vec4(shade_linear(lit_d - (lit_d - shadowed_d) * k), shadowed.a);
     }
-    return vec4(max(lit.rgb - (lit.rgb - shadowed.rgb) * k, vec3(0.0)), shadowed.a);
+    // Physical lighting: linear light, never below black, with the shadowed alpha.
+    @if(NVF_PHYSICAL_PBR) return vec4(max(lit.rgb - (lit.rgb - shadowed.rgb) * k, vec3(0.0)), shadowed.a);
+    @if(!NVF_PHYSICAL_PBR) return lit - (lit - shadowed) * k;
 }
 
 @if(FIRST_PERSON_DEPTH) struct FirstPersonOutput {
@@ -707,9 +734,9 @@ const EYE_CORNER_DARKEN: f32 = 0.30;
     let m = get_world_from_local(ii);
     let gaze = normalize((m * vec4(0.0, 1.0, 0.0, 0.0)).xyz);
     let up = normalize((m * vec4(0.0, 0.0, 1.0, 0.0)).xyz);
-    let r = reflect(-v, n);
+    let sky_r = reflect(-v, n);
     let facing = smoothstep(0.15, 0.72, max(dot(n, v), 0.0));
-    let open = smoothstep(0.25, 0.70, dot(r, gaze)) * (1.0 - smoothstep(0.10, 0.30, dot(r, up))) * facing;
+    let open = smoothstep(0.25, 0.70, dot(sky_r, gaze)) * (1.0 - smoothstep(0.10, 0.30, dot(sky_r, up))) * facing;
     return mix(EYE_SKY_CLOSED, EYE_SKY_OPEN, open);
 }
 
@@ -1379,8 +1406,8 @@ fn nif_fragment(
         out.color = apply_pbr_lighting(pbr_input);
         @if(!PREPASS_PIPELINE && SHADE_LIGHT) out.color = with_shade_light(pbr_input, out.color);
         // Bevy's ambient specular, with the same inputs as in apply_pbr_lighting and
-        // bevy_pbr::ambient::ambient_light (no lightmaps are used here). Disabled under
-        // `NVF_PHYSICAL_PBR`, which keeps full physical specular IBL.
+        // bevy_pbr::ambient::ambient_light (no lightmaps are used here). Not under Physical
+        // lighting, which keeps the physical specular image-based light.
         @if(!NVF_PHYSICAL_PBR) {
             let m = pbr_input.material;
             let F0 = calculate_F0(m.base_color.rgb, m.metallic, m.reflectance);
@@ -1412,12 +1439,14 @@ fn nif_fragment(
         @if(!PREPASS_PIPELINE && !TONEMAP_IN_SHADER && !BLEND_MULTIPLY && NVF_PHYSICAL_PBR) out.color = vec4(out.color.rgb + hot_e, out.color.a);
         // Environment map (nif_material.rs NifSurface::env, env_how; docs/spec-notes/nif.md
         // §6 "Window glass and environment maps", "Environment maps on other shapes"): the
-        // cube read in the view direction reflected about the normal, × the scale × the
+        // cube read in the view direction reflected about the normal (`env_lookup`), × the scale × the
         // mask × the distance fade, added to the lit colour. The game is Z-up and the
         // cube's faces are laid out Y-up: the game-space direction (x, y, z) is looked up
         // as (x, z, y), which from Bevy's Y-up world space (x, z, -y of the game) is
-        // (x, y, -z) [hypothesis]; env_how.x picks another orientation for a debug switch
-        // (env_map.rs Axes: 1 flip x, 2 flip y, 3 flip z, 4 swap y and z). A premultiplied
+        // (x, y, -z) [hypothesis, window shapes]. env_how.x 4, every other shape by default
+        // (#4392): the game-space direction as it is, Bevy's (x, -z, y) [hypothesis, from the
+        // original's picture of the Goodsprings camper]; 1 flip x, 2 flip y, 3 flip z are
+        // debug switches (env_map.rs Axes). A premultiplied
         // shape (a blended window shape that reflects) has its colour multiplied by its
         // alpha first, so the reflection lies over the blend whatever the alpha; a blended
         // shape is weighted by its alpha, reflection included [hypothesis]. Not in the blend
@@ -1445,18 +1474,7 @@ fn nif_fragment(
             out.color = vec4(select(out.color.rgb, out.color.rgb * out.color.a, premultiplied), out.color.a);
         }
         @if(!NIF_SURFACE_BLEND) if surface.env.x > 0.0 && env_fade > 0.0 {
-            let r = reflect(-pbr_input.V, pbr_input.N);
-            var dir = vec3(r.x, r.y, -r.z);
-            let axes = surface.env_how.x;
-            if axes > 3.5 {
-                dir = vec3(dir.x, dir.z, dir.y);
-            } else if axes > 2.5 {
-                dir = vec3(dir.x, dir.y, -dir.z);
-            } else if axes > 1.5 {
-                dir = vec3(dir.x, -dir.y, dir.z);
-            } else if axes > 0.5 {
-                dir = vec3(-dir.x, dir.y, dir.z);
-            }
+            let dir = env_lookup(pbr_input.V, pbr_input.N, pbr_input.world_normal, surface.env_how.x, surface.env_how.w);
             var mask = 1.0;
             @if(VERTEX_UVS_A) if surface.env.y > 0.5 && surface.env.y < 1.5 {
                 mask = env_mask_texel(in.instance_index, (standard_material(in.instance_index).uv_transform * vec3(in.uv, 1.0)).xy);
@@ -1478,6 +1496,8 @@ fn nif_fragment(
                 let luma_weights = vec3(0.2126, 0.7152, 0.0722);
                 reflection *= saturate(dot(lit_rgb, luma_weights) / max(dot(pbr_input.material.base_color.rgb, luma_weights), 0.02));
             }
+            // Physical lighting: the received light and a Schlick-shaped Fresnel weight
+            // (glass steeper than other shapes) [design, tuned by eye on #3828's branch].
             @if(NVF_PHYSICAL_PBR) if surface.env_how.z < 0.5 {
                 let luma_w = vec3(0.2126, 0.7152, 0.0722);
                 let recv = clamp(dot(lit_rgb, luma_w) / max(dot(pbr_input.material.base_color.rgb, luma_w), 0.04), 0.02, 1.0);
@@ -1518,15 +1538,19 @@ fn nif_fragment(
         }
     }
     @if(!PREPASS_PIPELINE) out.color = vec4(mix(out.color.rgb, surface.holes_edge.rgb, holes_band), out.color.a);
-    @if(!PREPASS_PIPELINE && !BLEND_MULTIPLY) let blend_mode = pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_ALPHA_MODE_RESERVED_BITS;
-    @if(!PREPASS_PIPELINE && !BLEND_MULTIPLY) if blend_mode == STANDARD_MATERIAL_FLAGS_ALPHA_MODE_BLEND && (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_UNLIT_BIT) != 0u {
+    // Physical lighting: a blended unlit colour is scaled before the fog and tonemapping
+    // (the original-look order scales it after them, below).
+    @if(!PREPASS_PIPELINE && !BLEND_MULTIPLY && NVF_PHYSICAL_PBR) let blend_mode = pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_ALPHA_MODE_RESERVED_BITS;
+    @if(!PREPASS_PIPELINE && !BLEND_MULTIPLY && NVF_PHYSICAL_PBR) if blend_mode == STANDARD_MATERIAL_FLAGS_ALPHA_MODE_BLEND && (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_UNLIT_BIT) != 0u {
         out.color = vec4(out.color.rgb * blend_colour_scale(out.color.a), out.color.a);
     }
-    // The colour is a factor, not light: no tonemapping, and attenuated toward 1 by fog
-    // transmittance so baked grime/AO decals recede behind fog instead of punching through.
-    // Bevy's multiply blend is destination × colour + destination × (1 − alpha).
+    // The colour is a factor, not light: no fog and no tonemapping. Bevy's multiply blend
+    // is destination × colour + destination × (1 − alpha), so the colour is premultiplied
+    // as bevy_pbr::pbr_functions::premultiply_alpha does. Under Physical lighting the
+    // factor goes towards 1 with the fog's transmittance, so grime and occlusion decals
+    // recede behind fog instead of showing through it.
     @if(!PREPASS_PIPELINE && BLEND_MULTIPLY) var factor = multiply_factor(out.color.rgb, multiply_emissive);
-    @if(!PREPASS_PIPELINE && BLEND_MULTIPLY && DISTANCE_FOG) if (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_FOG_ENABLED_BIT) != 0u {
+    @if(!PREPASS_PIPELINE && BLEND_MULTIPLY && DISTANCE_FOG && NVF_PHYSICAL_PBR) if (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_FOG_ENABLED_BIT) != 0u {
         let fog_black = apply_fog(fog, vec4(0.0, 0.0, 0.0, 1.0), pbr_input.world_position.xyz, view.world_position.xyz, pbr_input.frag_coord.xy).rgb;
         let fog_white = apply_fog(fog, vec4(1.0, 1.0, 1.0, 1.0), pbr_input.world_position.xyz, view.world_position.xyz, pbr_input.frag_coord.xy).rgb;
         let transmittance = saturate(fog_white - fog_black);
@@ -1561,6 +1585,10 @@ fn nif_fragment(
     // tone maps here when the view has no HDR (the Glow setting off).
     @if(PIPBOY_SCREEN) out.color.r = min(out.color.r, 0.67);
     @if(!PREPASS_PIPELINE && !BLEND_MULTIPLY && !BLEND_PREMULTIPLIED_ALPHA) out.color = main_pass_post_lighting_processing(pbr_input, out.color);
+    @if(!PREPASS_PIPELINE && !BLEND_MULTIPLY && !NVF_PHYSICAL_PBR) let blend_mode = pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_ALPHA_MODE_RESERVED_BITS;
+    @if(!PREPASS_PIPELINE && !BLEND_MULTIPLY && !NVF_PHYSICAL_PBR) if blend_mode == STANDARD_MATERIAL_FLAGS_ALPHA_MODE_BLEND && (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_UNLIT_BIT) != 0u {
+        out.color = vec4(out.color.rgb * blend_colour_scale(out.color.a), out.color.a);
+    }
     // NifSurface::pipboy_screen: the mark that keeps these pixels out of the image-space grade
     // (imagespace.wesl SCREEN_MARK).
     @if(PIPBOY_SCREEN) out.color.a = 0.25;

@@ -83,12 +83,58 @@ pub fn display_clip() -> bool {
     CLIP_INSTALLED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// The main view's tonemapper curve, which everything that writes display values into the
+/// HDR picture (the sky, the volumetric clouds) maps them for (nvf_assets tone_input.wesl
+/// `to_tonemap_input`). One place to ask, so a choice of curves (#4690) changes it here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToneCurve {
+    /// Display values clipped ([`GAME_CLIP`], [`GAME_HDR`]): the value is the input.
+    Clipped,
+    /// Bevy's Tony McMapface: Physical lighting with `NVF_TONEMAP=tony` ([`physical_tony`]),
+    /// and the display-value look's `NVF_TONEMAP=tony`.
+    TonyMcMapface,
+    /// Bevy's AgX with the Punchy look: Physical lighting on this branch ([`physical_agx`]).
+    AgX,
+}
+
+impl ToneCurve {
+    /// The code the shaders take (tone_input.wesl `TONE_CLIPPED`).
+    pub fn code(self) -> f32 {
+        match self {
+            ToneCurve::Clipped => 1.0,
+            ToneCurve::TonyMcMapface => 0.0,
+            // AgX shares Tony McMapface's inverse (code 0), as the sky did before the curve
+            // had a name [hypothesis: close enough for the grey response; not measured].
+            ToneCurve::AgX => 0.0,
+        }
+    }
+}
+
+/// The main view's curve this frame.
+pub fn tone_curve() -> ToneCurve {
+    if display_clip() {
+        ToneCurve::Clipped
+    } else if physical_agx() {
+        ToneCurve::AgX
+    } else {
+        ToneCurve::TonyMcMapface
+    }
+}
+
 /// Whether the main world view uses Bevy's `Tonemapping::AgX` + Punchy look
 /// (`NVF_PHYSICAL_PBR=1`, unless overridden with `NVF_TONEMAP=clip` or `tony`).
 pub fn physical_agx() -> bool {
     nvf_assets::authored::physical_pbr()
         && !std::env::var("NVF_TONEMAP")
             .is_ok_and(|v| v.eq_ignore_ascii_case("clip") || v.eq_ignore_ascii_case("tony"))
+}
+
+/// Whether the main world view keeps Bevy's Tony McMapface curve under Physical lighting:
+/// its light is linear and runs above 1, which the display-value clip would cut off. The
+/// volumetric clouds and the air tonemap with the same curve (graphics-enhanced.md §3.25);
+/// a choice of tonemapper for every view is #4690's.
+pub fn physical_tony() -> bool {
+    nvf_assets::authored::physical_pbr() && !physical_agx()
 }
 
 pub struct LightsPlugin;
@@ -147,7 +193,9 @@ fn patch_clip(mut state: ResMut<TonemapShader>, mut shaders: ResMut<Assets<Shade
         return;
     }
     if physical_agx() {
-        info!("lights: NVF_PHYSICAL_PBR=1, the main view uses AgX");
+        info!("lights: physical PBR, the main view uses AgX");
+    } else if physical_tony() {
+        info!("lights: physical PBR, the main view keeps Tony McMapface");
         return;
     }
     let bevy::shader::Source::Wesl(source) = &shader.source else {
@@ -185,11 +233,17 @@ fn patch_display_sum(mut state: ResMut<FunctionsShader>, mut shaders: ResMut<Ass
     let Some(shader) = shaders.get(&state.handle) else { return };
     state.patched = true;
     let physical = nvf_assets::authored::physical_pbr();
+    // The reflection gate goes in with the display-value sum, and under Physical lighting when
+    // this run has authored reflections: then the reflection cube keeps the view's environment
+    // map, authored materials alone read it, and other surfaces take the light loop's flat
+    // ambient. Otherwise the sky's image-based light reaches every surface (physical_ibl.rs;
+    // graphics-enhanced.md §3.25).
+    let gating = !physical || nvf_assets::reflection_cube::enabled();
     let bevy::shader::Source::Wesl(source) = &shader.source else {
         error!("{PBR_FUNCTIONS}: not WESL; surfaces keep Bevy's linear lighting sum");
         crate::ssao_lighting::set_hook_state(crate::ssao_lighting::HookState::Failed);
         crate::rtgi_volume::set_hook_state(crate::rtgi_volume::HookState::Failed);
-        if !physical {
+        if gating {
             reflection_gate_failed();
         }
         return;
@@ -199,7 +253,7 @@ fn patch_display_sum(mut state: ResMut<FunctionsShader>, mut shaders: ResMut<Ass
         error!("{PBR_FUNCTIONS}: apply_pbr_lighting not as expected (Bevy changed?); surfaces keep Bevy's linear lighting sum");
         crate::ssao_lighting::set_hook_state(crate::ssao_lighting::HookState::Failed);
         crate::rtgi_volume::set_hook_state(crate::rtgi_volume::HookState::Failed);
-        if !physical {
+        if gating {
             reflection_gate_failed();
         }
         return;
@@ -221,6 +275,11 @@ fn patch_display_sum(mut state: ResMut<FunctionsShader>, mut shaders: ResMut<Ass
         crate::ssao_lighting::hook_patched(&patched)
     } {
         Some(hooked) => (hooked, true),
+        None if physical => {
+            info!("ambient occlusion: on the picture under physical PBR (its lighting hook is still to come)");
+            crate::ssao_lighting::set_hook_state(crate::ssao_lighting::HookState::Failed);
+            (patched, false)
+        }
         None => {
             error!("{PBR_FUNCTIONS}: the ambient occlusion hook's anchors not found (Bevy changed?); the occlusion stays on the picture");
             crate::ssao_lighting::set_hook_state(crate::ssao_lighting::HookState::Failed);
@@ -261,8 +320,8 @@ fn patch_display_sum(mut state: ResMut<FunctionsShader>, mut shaders: ResMut<Ass
     // The reflection gate last (lights/reflection_gate.rs): the view's environment map light
     // reaches only fragments that opt in. Made whether or not reflections are on in this run;
     // without the opt-in def its text compiles to what Bevy's did without a cube. Under
-    // physical PBR (`NVF_PHYSICAL_PBR=1`), PhysicalIblPlugin provides full-scene IBL directly.
-    let (patched, gated) = if physical {
+    // physical PBR (the Physical lighting row), PhysicalIblPlugin provides full-scene IBL directly.
+    let (patched, gated) = if !gating {
         (patched, false)
     } else {
         match reflection_gate::gate_patched(&patched) {
@@ -277,7 +336,7 @@ fn patch_display_sum(mut state: ResMut<FunctionsShader>, mut shaders: ResMut<Ass
         error!("{PBR_FUNCTIONS}: the patched shader could not be stored ({e:?}); surfaces keep Bevy's lighting sum");
         crate::ssao_lighting::set_hook_state(crate::ssao_lighting::HookState::Failed);
         crate::rtgi_volume::set_hook_state(crate::rtgi_volume::HookState::Failed);
-        if !physical {
+        if gating {
             reflection_gate_failed();
         }
         return;
@@ -295,7 +354,7 @@ fn patch_display_sum(mut state: ResMut<FunctionsShader>, mut shaders: ResMut<Ass
         crate::rtgi_volume::set_hook_state(crate::rtgi_volume::HookState::Installed);
         info!("lights: RTGI volume hook installed");
     }
-    if !physical {
+    if gating {
         if gated {
             nvf_assets::reflection_cube::set_gate_state(nvf_assets::reflection_cube::GateState::Installed);
             info!("lights: reflection gate installed (the environment map light reaches opted-in fragments only)");
@@ -843,6 +902,11 @@ mod tests {
         assert!(at("nvf_spot_display(light_id") < at("nvf_directional_display(i,"));
         assert!(at("nvf_directional_display(i,") < at("let nvf_sum"));
         assert!(at("let nvf_sum") < at("// Total light"));
+        // The product is formed in display values and made linear by the sRGB curve, the
+        // frame's own (not a 2.2 power, which shows dark products at half and less).
+        assert!(out.contains("direct_light += nvf_display_to_linear(min(nvf_linear_to_display(diffuse_color) * nvf_sum, vec3(1.0))) / view_bindings::view.exposure;"));
+        assert!(at("fn nvf_linear_to_display(") < at("fn nvf_display_to_linear(") && at("fn nvf_display_to_linear(") < at("fn apply_pbr_lighting("));
+        assert!(!out.contains("pow(nvf_sum"));
         assert_eq!(out.matches("fn apply_pbr_lighting(").count(), 1);
         assert!(out.starts_with("head\n") && out.ends_with("tail\n"));
         // A missing anchor (Bevy changed) leaves the source alone.
@@ -887,6 +951,12 @@ mod tests {
             assert!(physical_lighting.contains("    let F = fresnel(F0, LdotH);"), "Cook-Torrance keeps full Schlick Fresnel");
             assert!(!physical_lighting.contains("select(fresnel(F0, LdotH), F0"), "display Fresnel clamp is absent");
             assert!(physical_lighting.contains("fn nvf_light_colour("), "display-space light uniforms remain linearized");
+            // One sRGB decode (the owner's review of #4199): main's nvf_display_to_linear, once, and
+            // the HDR decode written with it; the physical pbr_functions carries no copy of its own.
+            assert_eq!(physical_lighting.matches("fn nvf_display_to_linear(").count(), 1);
+            assert!(physical_lighting.contains("return nvf_display_to_linear(x / m) * m;"));
+            assert!(!physical_lighting.contains("@if(!PREPASS_FRAGMENT)\nfn nvf_display_to_linear("), "pbr_lighting is read by prepass shaders too");
+            assert!(!physical_lighting.contains("NVF_DISPLAY_TO_LINEAR"), "the mark is replaced");
         }
 
         let display_lighting = lighting_patched(&lighting_src, false).expect("display lighting_patched succeeds");
@@ -903,8 +973,12 @@ mod tests {
         assert!(physical_functions.contains("// nvf_physical_ibl_diff_ao"));
         assert!(physical_functions.contains("let nvf_ambient_lin = "));
         assert!(!physical_functions.contains("nvf_point_display"));
+        assert!(!physical_functions.contains("fn nvf_srgb_to_linear_hdr(") && !physical_functions.contains("fn nvf_display_to_linear("), "no copy of the decode");
+        assert!(physical_functions.contains("lighting::nvf_srgb_to_linear_hdr("));
         let sun_patched = crate::sun_visibility::hook_patched(&physical_functions).expect("sun_visibility hook applies after physical_patched");
         assert!(crate::ssao_lighting::physical_hook_patched(&sun_patched).is_some(), "physical AO hook applies after sun hook");
+        // Authored reflections under physical lighting: the reflection gate goes in after them.
+        assert!(reflection_gate::gate_patched(&sun_patched).is_some(), "the reflection gate applies after physical_patched");
     }
 
     /// CPU white-furnace check for EON (`Fd_OrenNayar` without dielectric coupling):

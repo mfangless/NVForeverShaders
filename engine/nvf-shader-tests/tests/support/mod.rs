@@ -114,6 +114,12 @@ impl Compiler {
         Self::build(&[], true, false, physical_pbr, diffuse, true)
     }
 
+    /// The physical PBR patches with the reflection gate after them (Physical lighting in a
+    /// run with authored reflections, nvforever lights.rs `gating`).
+    pub fn with_physical_pbr_and_gate() -> Self {
+        Self::build(&[], true, true, true, production_display_shader::PhysicalDiffuse::OrenNayar, false)
+    }
+
     fn build(
         remove_invariance: &[&str],
         ambient_occlusion_hook: bool,
@@ -151,12 +157,19 @@ impl Compiler {
             ("bevy_render", "vendor/bevy_render/src"),
             ("nvforever", "nvforever/src"),
         ];
-        if ambient_occlusion_hook {
+        if ambient_occlusion_hook || physical_pbr {
             packages.push(("nvf_assets", "nvf-assets/src"));
         }
+        let all_assets = packages.iter().any(|(package, _)| *package == "nvf_assets");
         for (package, directory) in packages {
             let root = engine.join(directory);
             compiler.register_directory(package, &root, &root, remove_invariance);
+        }
+        // The shared tonemapper input, which nvforever's sky and clouds import whatever else
+        // of nvf_assets a test leaves out.
+        if !all_assets {
+            let path = engine.join("nvf-assets/src/tone_input.wesl");
+            compiler.register("nvf_assets/tone_input.wesl", fs::read_to_string(path).expect("tone_input.wesl"));
         }
         compiler
     }
@@ -296,7 +309,7 @@ impl Compiler {
             ShaderDefVal::UInt("MAX_RECT_LIGHTS".into(), 1),
         ]);
         self.cache
-            .get(0, self.shaders[name], &definitions)
+            .get(0, *self.shaders.get(name).unwrap_or_else(|| panic!("{name}: no such shader registered")), &definitions)
             .unwrap_or_else(|error| panic!("{name}, {extra:?}: {error}"))
     }
 }

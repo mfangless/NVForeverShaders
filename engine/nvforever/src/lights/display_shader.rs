@@ -7,12 +7,12 @@ pub(crate) const BEVY_ATTENUATION: &str = "return getRangeFalloff(distanceSquare
 /// against in-game captures; the LIGH falloff exponent, 1 for most lights, is not used].
 pub(crate) const GAME_ATTENUATION: &str = "return saturate(1.0 - distanceSquare * inverseRangeSquared);";
 
-/// Physical windowed inverse-square attenuation (`NVF_PHYSICAL_PBR=1`): Frostbite/Karis
+/// Physical windowed inverse-square attenuation (the Physical lighting row): Frostbite/Karis
 /// $1/d^2$ falloff with finite bulb core radius $(0.30 R)$ and $(1 - (d/R)^4)_+^2$ edge
 /// windowing, normalized so $d \approx 0.35 R$ matches room-scale luminaire calibration.
 pub(crate) const PHYSICAL_ATTENUATION: &str = "let u = distanceSquare * inverseRangeSquared;\n    let w = saturate(1.0 - u * u);\n    return (w * w) * (0.22 / (u + 0.09));";
 
-/// Desktop Filament perceptual roughness floor (`NVF_PHYSICAL_PBR=1`) replacing mobile `0.089`.
+/// Desktop Filament perceptual roughness floor (the Physical lighting row) replacing mobile `0.089`.
 const ROUGHNESS_FLOOR_EDIT: (&str, &str) = (
     "    let clampedPerceptualRoughness = clamp(perceptualRoughness, 0.089, 1.0);",
     "    let clampedPerceptualRoughness = clamp(perceptualRoughness, 0.045, 1.0);",
@@ -53,17 +53,18 @@ fn getDistanceAttenuation(",
 ];
 
 /// Exact IEC 61966-2-1 HDR-preserving sRGB decode for physical PBR clustered light
-/// uniforms (`NVF_PHYSICAL_PBR=1`); directional lights receive pure linear RGB directly.
+/// uniforms (the Physical lighting row); directional lights receive pure linear RGB directly.
 const PHYSICAL_SPECULAR_EDITS: [(&str, &str); 2] = [
     (
         "fn getDistanceAttenuation(",
-        "// NVForever (nvforever lights.rs PHYSICAL_SPECULAR_EDITS): exact IEC 61966-2-1 HDR-preserving sRGB decode.
-fn nvf_light_srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+        "// NVForever (nvforever lights.rs PHYSICAL_SPECULAR_EDITS): the sRGB decode, kept above 1.
+// nvf_display_to_linear is the display-value sum's own (DISPLAY_HELPERS), put here by
+// `lighting_patched`; pbr_functions' physical helpers read nvf_srgb_to_linear_hdr from here.
+NVF_DISPLAY_TO_LINEAR
+fn nvf_srgb_to_linear_hdr(c: vec3<f32>) -> vec3<f32> {
     let x = max(c, vec3(0.0));
     let m = max(max(x.r, max(x.g, x.b)), 1.0);
-    let n = x / m;
-    let lin = select(pow((n + vec3(0.055)) / 1.055, vec3(2.4)), n / 12.92, n <= vec3(0.04045));
-    return lin * m;
+    return nvf_display_to_linear(x / m) * m;
 }
 
 fn nvf_light_colour(c: vec3<f32>) -> vec3<f32> {
@@ -71,7 +72,7 @@ fn nvf_light_colour(c: vec3<f32>) -> vec3<f32> {
         return c;
     }
     let k = view_bindings::view.exposure / PI;
-    return nvf_light_srgb_to_linear(c * k) / k;
+    return nvf_srgb_to_linear_hdr(c * k) / k;
 }
 
 fn getDistanceAttenuation(",
@@ -289,6 +290,15 @@ pub(crate) fn diffuse_patched(source: &str, diffuse: PhysicalDiffuse) -> Option<
     Some(out.replace(BURLEY_CALL, call_text))
 }
 
+/// The display-value sum's `nvf_display_to_linear` ([`DISPLAY_HELPERS`]), one copy of the
+/// sRGB decode for both looks: Physical lighting's light colours and ambient read it from
+/// `pbr_lighting` (prepass shaders included, so without its `PREPASS_FRAGMENT` gate).
+fn display_to_linear_fn() -> Option<String> {
+    let start = DISPLAY_HELPERS.find("fn nvf_display_to_linear(")?;
+    let end = start + DISPLAY_HELPERS[start..].find("\n}\n")? + 3;
+    Some(DISPLAY_HELPERS[start..end].to_string())
+}
+
 /// Patches `bevy_pbr/render/pbr_lighting.wesl` for either physical PBR (`physical = true`,
 /// with the requested [`PhysicalDiffuse`]) or display-value lighting (`physical = false`).
 #[allow(dead_code)]
@@ -307,6 +317,7 @@ pub(crate) fn lighting_patched_with_diffuse(source: &str, physical: bool, diffus
         patched = patched.replace(from, to);
     }
     if physical {
+        patched = patched.replace("NVF_DISPLAY_TO_LINEAR\n", &display_to_linear_fn()?);
         if patched.matches(ROUGHNESS_FLOOR_EDIT.0).count() != 1 {
             return None;
         }
@@ -354,7 +365,12 @@ pub const fn spot_specular_scale(first_person: bool, casts_shadows: bool) -> f32
 /// patched `apply_pbr_lighting` leaves Bevy's diffuse terms out (diffuse colour 0 for the
 /// lights and the ambient light, so only their specular parts stay), forms the sum from
 /// the same lights' colours, which hold display values there (`lights::display_color`), and
-/// adds diffuse colour × sum^2.2 (the display gamma) as light. Views without the mark
+/// adds, as light, the linear colour of the diffuse colour's display value × the sum, held
+/// to 1: both ways by the sRGB curve, the one the texture was read through and the frame is
+/// shown through, so the shown value is that product. (Until 2026-11-25 it added diffuse
+/// colour × sum^2.2. A 2.2 power and the sRGB curve part ways in the dark: a floor of display
+/// value 0.4 under an interior's ambient of 40 / 255 was shown as 8 / 255 where the product is
+/// 16 / 255, world.md §8 "Dark values of the sum".) Views without the mark
 /// (the minigame views) keep Bevy's sum. `nvf_apply_pbr_lighting` takes weights for the
 /// ambient and the direct part of the sum (grass.wesl); `apply_pbr_lighting` is it with
 /// weights 1. Each helper carries the condition Bevy puts on `apply_pbr_lighting`
@@ -363,6 +379,20 @@ const DISPLAY_HELPERS: &str = "// NVForever (nvforever lights.rs DISPLAY_HELPERS
 @if(!PREPASS_FRAGMENT)
 fn nvf_display_lighting() -> bool {
     return view_bindings::lights.ambient_color.a < 0.0;
+}
+
+// The sRGB transfer, both ways (the texture's and the frame's own curve, IEC 61966-2-1):
+// the display value of a linear colour, and back.
+@if(!PREPASS_FRAGMENT)
+fn nvf_linear_to_display(c: vec3<f32>) -> vec3<f32> {
+    let x = max(c, vec3(0.0));
+    return select(1.055 * pow(x, vec3(1.0 / 2.4)) - 0.055, x * 12.92, x <= vec3(0.0031308));
+}
+
+@if(!PREPASS_FRAGMENT)
+fn nvf_display_to_linear(c: vec3<f32>) -> vec3<f32> {
+    let x = max(c, vec3(0.0));
+    return select(pow((x + 0.055) / 1.055, vec3(2.4)), x / 12.92, x <= vec3(0.04045));
 }
 
 // A clustered point or spot light's diffuse light on a surface at P facing N, as display
@@ -464,7 +494,7 @@ const DISPLAY_EDITS: [(&str, &str); 7] = [
         let nvf_ambient = view_bindings::lights.ambient_color.rgb * view_bindings::view.exposure * diffuse_occlusion;
         let nvf_sum = max(nvf_weights.x * nvf_ambient + nvf_weights.y * nvf_direct, vec3(0.0));
         // Held to 1 per channel, as the original's lit colour is (lights.rs GAME_CLIP).
-        direct_light += min(diffuse_color * pow(nvf_sum, vec3(2.2)), vec3(1.0)) / view_bindings::view.exposure;
+        direct_light += nvf_display_to_linear(min(nvf_linear_to_display(diffuse_color) * nvf_sum, vec3(1.0))) / view_bindings::view.exposure;
     }
 
     // Total light\n",
@@ -477,21 +507,12 @@ fn nvf_display_lighting() -> bool {
     return view_bindings::lights.ambient_color.a < 0.0;
 }
 
-@if(!PREPASS_FRAGMENT)
-fn nvf_srgb_to_linear_hdr(c: vec3<f32>) -> vec3<f32> {
-    let x = max(c, vec3(0.0));
-    let m = max(max(x.r, max(x.g, x.b)), 1.0);
-    let n = x / m;
-    let lin = select(pow((n + vec3(0.055)) / 1.055, vec3(2.4)), n / 12.92, n <= vec3(0.04045));
-    return lin * m;
-}
-
 // What is left of Bevy's ambient light in a fallback view without an environment cubemap,
 // taking the ambient colour as exact IEC sRGB linear light.
 @if(!PREPASS_FRAGMENT)
 fn nvf_ambient_ratio() -> vec3<f32> {
     let scaled = max(view_bindings::lights.ambient_color.rgb * view_bindings::view.exposure, vec3(1e-6));
-    return nvf_srgb_to_linear_hdr(scaled) / scaled;
+    return lighting::nvf_srgb_to_linear_hdr(scaled) / scaled;
 }
 
 // Lagarde & de Rousiers (2014) Frostbite roughness-dependent specular AO.
@@ -513,7 +534,7 @@ fn nvf_apply_pbr_lighting(
     nvf_weights: vec2<f32>,
 ) -> vec4<f32> {";
 
-/// Replacements in `apply_pbr_lighting` for `NVF_PHYSICAL_PBR=1`: keeps Bevy's linear direct
+/// Replacements in `apply_pbr_lighting` for Physical lighting: keeps Bevy's linear direct
 /// diffuse and specular loops active, routes world indirect lighting through procedural sky
 /// `ENVIRONMENT_MAP` IBL (without double-counting flat `ambient::ambient_light`), and keeps a
 /// fallback linear ambient path when `ENVIRONMENT_MAP` is absent.
@@ -565,12 +586,12 @@ const PHYSICAL_EDITS: [(&str, &str); 8] = [
         @if(ENVIRONMENT_MAP) {
             indirect_light *= nvf_w.x;
             if (view_bindings::light_probes.view_cubemap_index < 0) {
-                let nvf_env_fallback_lin = nvf_srgb_to_linear_hdr(view_bindings::lights.ambient_color.rgb * view_bindings::view.exposure) * diffuse_occlusion;
+                let nvf_env_fallback_lin = lighting::nvf_srgb_to_linear_hdr(view_bindings::lights.ambient_color.rgb * view_bindings::view.exposure) * diffuse_occlusion;
                 indirect_light += diffuse_color * nvf_env_fallback_lin * nvf_w.x / max(view_bindings::view.exposure, 1e-6);
             }
         }
         @if(!ENVIRONMENT_MAP) {
-            let nvf_ambient_lin = nvf_srgb_to_linear_hdr(view_bindings::lights.ambient_color.rgb * view_bindings::view.exposure) * diffuse_occlusion; // nvf_physical_fallback_ambient
+            let nvf_ambient_lin = lighting::nvf_srgb_to_linear_hdr(view_bindings::lights.ambient_color.rgb * view_bindings::view.exposure) * diffuse_occlusion; // nvf_physical_fallback_ambient
             indirect_light = indirect_light * nvf_w.x + diffuse_color * nvf_ambient_lin * nvf_w.x / max(view_bindings::view.exposure, 1e-6);
         }
     }

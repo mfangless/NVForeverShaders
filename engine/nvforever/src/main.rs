@@ -143,6 +143,7 @@ mod light_shadows;
 mod lights;
 mod photo_lights;
 mod physical_ibl;
+mod tone_presets;
 mod limbs;
 mod lips;
 mod memory_budget;
@@ -162,6 +163,11 @@ mod terminal_view;
 mod scope_lens;
 mod scope_view;
 mod poker_view;
+mod slots_view;
+mod caravan_pot;
+mod caravan_view;
+mod card_shape;
+mod slots_seat;
 mod lod;
 mod locomotion;
 mod combat_face;
@@ -276,6 +282,7 @@ mod vigor_view;
 mod walk_probe;
 mod water;
 mod weapon_models;
+mod wind_dust;
 mod window_icon;
 mod window_mode;
 mod keep_awake;
@@ -1920,9 +1927,12 @@ fn run_with_args(line: Vec<String>) -> AppExit {
     let given_at_start = play.is_some().then(|| settings::given_switches(&args, &command_line()));
     let authored = settings::authored_after_ini(graphics.authored_materials, given_at_start.as_ref());
     nvf_assets::authored::set_enabled(authored);
-    app.add_systems(Startup, move || info!("authored materials: {}", if authored { "on (sets under textures\\pbr\\ are used where a pack has them)" } else { "off (setting)" }));
-    let physical_pbr = settings::physical_pbr_after_ini(graphics.physical_pbr, given_at_start.as_ref());
+    // Physical PBR lighting (graphics-enhanced.md §3.25): the run's state by the same rule,
+    // fixed before the first shader hook and material; the page's row changes the next start's.
+    let physical_pbr = settings::physical_pbr_after_ini(graphics.physical_pbr, play.is_some().then(|| settings::given_switches(&args, &command_line())).as_ref());
     nvf_assets::authored::set_physical_pbr(physical_pbr);
+    app.add_systems(Startup, move || info!("physical PBR: {}", if physical_pbr { "on" } else { "off" }));
+    app.add_systems(Startup, move || info!("authored materials: {}", if authored { "on (sets under textures\\pbr\\ are used where a pack has them)" } else { "off (setting)" }));
     let diffuse_model = settings::diffuse_after_ini(graphics.diffuse_model, given_at_start.as_ref());
     graphics.diffuse_model = diffuse_model;
     nvf_assets::authored::set_diffuse_model(diffuse_model);
@@ -1945,6 +1955,9 @@ fn run_with_args(line: Vec<String>) -> AppExit {
     // (reflection_sky.rs). Inactive when physical PBR supplies full-scene IBL.
     let reflections = !physical_pbr && settings::reflections_after_ini(graphics.authored_reflections, given_at_start.as_ref());
     nvf_assets::reflection_cube::set_enabled(reflections && authored);
+    if physical_pbr && reflections && authored {
+        app.add_systems(Startup, || info!("physical PBR: authored reflections keep the view's environment map; the sky's image-based light is off and other surfaces take flat ambient"));
+    }
     app.add_systems(Startup, move || {
         info!(
             "authored reflections: {}",
@@ -2057,14 +2070,16 @@ fn run_with_args(line: Vec<String>) -> AppExit {
     // Its solid cores of blended shapes (only while the light is drawn).
     .add_plugins(solid_cores::SolidCoresPlugin)
     // The sun visibility factor: cloud and terrain shadows on the sun (off until a producer sets it).
+    // Physical lighting's image-based light from the sky (graphics-enhanced.md §3.25); idle
+    // without the row.
+    .add_plugins(physical_ibl::PhysicalIblPlugin)
+    .add_plugins(tone_presets::TonePresetsPlugin)
     .add_plugins(sun_visibility::SunVisibilityPlugin)
     // The ambient occlusion's shader for the lighting (imported only under its def).
     .add_plugins(ssao_lighting::SsaoLightingPlugin)
     // Opt-in subsurface scattering (NVF_SSS=1): skin + foliage shader helpers.
     .add_plugins(sss::SssPlugin)
-    // Procedural HDR sky/ground/interior IBL cubemaps when NVF_PHYSICAL_PBR=1.
-    .add_plugins(physical_ibl::PhysicalIblPlugin)
-    // The bounce light volume's shader for the lighting (imported only under its def, which no view gives yet).
+    // The bounce light volume: its shader for the lighting (imported only under its def), its bindings (only on request).
     .add_plugins(rtgi_volume::RtgiVolumePlugin)
     // Shadows of placed lights, the ALC shadows row (off by default).
     .add_plugins(light_shadows::LightShadowsPlugin(args.light_shadows.unwrap_or(light_shadows::LightShadowMode::Off)))
@@ -2156,6 +2171,7 @@ fn run_with_args(line: Vec<String>) -> AppExit {
         centre: None,
         waiting: Vec::new(),
         model_overrides: Default::default(),
+        coop_areas: Vec::new(),
         travels: 0,
     })
     .insert_resource(world)
@@ -2329,6 +2345,8 @@ fn run_with_args(line: Vec<String>) -> AppExit {
         app.add_plugins(roulette_view::RouletteViewPlugin);
         // The blackjack table (blackjack_view.rs).
         app.add_plugins(blackjack_view::BlackjackViewPlugin);
+        // The reels turning on the placed slot machine, its arm and spin camera (slots_view.rs).
+        app.add_plugins(slots_view::SlotsViewPlugin);
         // Test aid NVF_PLAY_TEST_TERRAIN_PARALLAX_AB: the terrain parallax's readback (#3322).
         terrain_parallax_ab::install(&mut app);
         // The terminal's monitor (terminal_view.rs).
@@ -2338,6 +2356,8 @@ fn run_with_args(line: Vec<String>) -> AppExit {
         app.add_plugins(scope_view::ScopeViewPlugin);
         // The poker table (poker_view.rs).
         app.add_plugins(poker_view::PokerViewPlugin);
+        // The Caravan table in 3D (caravan_view.rs).
+        app.add_plugins(caravan_view::CaravanViewPlugin);
     }
     if let Some(a) = actor_world {
         if let Some(c) = creator_data.take() {
@@ -2439,6 +2459,9 @@ fn run_with_args(line: Vec<String>) -> AppExit {
             app.add_plugins(npc_combat::NpcCombatPlugin);
             // NPCs heal with the stimpaks they carry (npc_stimpaks.rs).
             app.add_plugins(npc_stimpaks::NpcStimpaksPlugin);
+            // A slot machine played in the world: the body's idles and win celebration
+            // (slots_seat.rs).
+            app.add_plugins(slots_seat::SlotsSeatPlugin);
             // Creatures fight with their body weapons and switch between them (body_weapons.rs).
             app.add_plugins(body_weapons::BodyWeaponsPlugin);
             // Scripted weapon use: UseWeapon, Use Weapon packages (use_weapon.rs).

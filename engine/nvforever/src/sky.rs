@@ -203,6 +203,18 @@ const MOON_FADE: (f32, f32) = (5.0, -6.0);
 /// The moon disc is hidden while its direction's height (Bevy y) is below this
 /// (`update_night_sky`; night_sky.rs follows the same rule).
 pub(crate) const MOON_HIDDEN_Y: f32 = -0.1;
+/// The volumetric clouds' daylight under Physical lighting ([`SkyState::physical_cloud_light`]):
+/// linear RGB, in the physical dome's units.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct CloudDaylight {
+    pub sun: [f32; 3],
+    pub upper: [f32; 3],
+    pub horizon: [f32; 3],
+    /// The sky light the ground under the clouds takes (their light from below): the dome's
+    /// mean of overhead and horizon, in place of the weather's Ambient.
+    pub ground: [f32; 3],
+}
+
 /// How far south of the east-west line the sun's path runs, in radians (9°) [hypothesis,
 /// fitted to the original game's sun positions; fnv_world::sky::sun_direction].
 const SUN_SOUTH: f32 = 9.0 * PI / 180.0;
@@ -1524,6 +1536,42 @@ impl SkyState {
         w_sun.lerp(t_sun * weather_atten, phys_weight).to_array()
     }
 
+    /// The daylight the volumetric clouds take under Physical lighting (volumetric_clouds.rs
+    /// `inputs`), in the physical dome's own units (linear light, no tonemapper inverse): the
+    /// sun colour the surfaces' sun light has ([`Self::physical_sun_color`]), and the sky's
+    /// colour overhead and at the horizon as sky.wesl draws the dome (the weather's, times its
+    /// day level, blended toward `eval_physical_sky` by the clearness, as physical_ibl.rs does
+    /// too). The sky colours are divided by the sky's display scale, which the clouds apply
+    /// themselves, so the product is the dome's [design].
+    ///
+    /// The sun carries the surfaces' physical gain (`PHYSICAL_SUN_GAIN`, by night
+    /// `PHYSICAL_MOON_GAIN`, as [`aim_sun`] gives the ground): without it the clouds were lit by
+    /// about a seventh of the ground's sun and came out grey against the sky behind them, once
+    /// the exposure followed the brighter ground [observed: Goodsprings at 17:30, 2026-11-26].
+    pub(crate) fn physical_cloud_light(&self) -> CloudDaylight {
+        let sun_dir = self.sun_dir().normalize_or(Vec3::Y);
+        let clearness = self.physical_sky_clearness();
+        let phys_weight = smoothstep(0.10, 0.85, clearness);
+        let day_vis = smoothstep(-0.04, 0.25, sun_dir.y);
+        let scale = self.sky_scale().max(1e-6);
+        let perp = Vec3::new(-sun_dir.z, 0.0, sun_dir.x).normalize_or(Vec3::X);
+        let horizon_ray = (perp * 0.9975 + Vec3::Y * 0.07).normalize();
+        let level = 0.45 + (1.35 - 0.45) * day_vis;
+        let dome = |weather: [f32; 3], dir: Vec3| -> [f32; 3] {
+            let weather = Vec3::from_array(weather) * level;
+            weather.lerp(eval_physical_sky(dir, sun_dir, clearness) / scale, phys_weight).to_array()
+        };
+        let gain = if sun_dir.y >= 0.0 { PHYSICAL_SUN_GAIN } else { PHYSICAL_MOON_GAIN };
+        let upper = dome(self.color(ColorType::SkyUpper), Vec3::Y);
+        let horizon = dome(self.color(ColorType::Horizon), horizon_ray);
+        CloudDaylight {
+            sun: (Vec3::from_array(self.physical_sun_color()) * gain).to_array(),
+            upper,
+            horizon,
+            ground: ((Vec3::from_array(upper) + Vec3::from_array(horizon)) * 0.5).to_array(),
+        }
+    }
+
     /// Horizon scattering colour matched to `eval_physical_sky` at 4° elevation so aerial
     /// perspective fog and the physical sky dome meet seamlessly at distant ridges.
     pub(crate) fn physical_horizon_color(&self) -> [f32; 3] {
@@ -1562,9 +1610,10 @@ impl SkyState {
         };
         SkyLight {
             params: Vec4::new(self.sky_scale(), 0.0, 1.0, 0.0),
-            // w: 1 when the main view shows display values clipped (lights.rs
-            // `display_clip`), so the sky leaves out its inverse of Tony McMapface.
-            glow: Vec3::ZERO.extend(if crate::lights::display_clip() { 1.0 } else { 0.0 }),
+            // w: the main view's tonemapper curve (lights.rs `ToneCurve::code`, 1 display
+            // values clipped), which the sky maps its display values for (tone_input.wesl).
+            glow: Vec3::ZERO.extend(crate::lights::tone_curve().code()),
+            // w: the physical sky's clearness (sky.wesl, physical lighting; 0 otherwise).
             sun_dir: dir.extend(clearness),
             sun: (sun_col * SUN_STRENGTH).extend(half_tan(fair_value(SUN_SIZE_DEG, fair_size))),
             glare: (sun_col * GLARE_STRENGTH * glare * fair_value(1.0, fair_gain)).extend(half_tan(fair_value(GLARE_SIZE_DEG, fair_glare))),
@@ -2727,6 +2776,8 @@ pub(crate) fn apply_cell_fog(sky: &SkyState, fog: &mut DistanceFog, emissive_mod
     } else {
         let range = sky.fog_override.map(|(n, f)| (n, f, 1.0)).or_else(|| sky.fog());
         let (near, far, strength) = range.unwrap_or((0.0, 0.0, 0.0));
+        // Under Physical lighting the game's fog fades far land into the physical dome's
+        // horizon colour, the sky behind it (graphics-enhanced.md §3.25).
         let fog_rgb = if nvf_assets::authored::physical_pbr() {
             sky.physical_horizon_color()
         } else {
@@ -3019,7 +3070,7 @@ mod session_lighting_tests;
 
 #[cfg(test)]
 #[path = "cartographer_live_tests.rs"]
-mod cartographer_live_tests;
+pub(crate) mod cartographer_live_tests;
 
 #[cfg(test)]
 pub(crate) fn authored_session_sky() -> SkyState {
@@ -4019,6 +4070,40 @@ mod tests {
 
         let night = eval_physical_sky(Vec3::Y, Vec3::new(0.0, -0.5, 0.866).normalize(), 1.0);
         assert!(night.x > 0.0 && night.z > night.x && night.x < 0.01, "night sky is dim cool blue: {night}");
+    }
+
+    /// The clouds' physical daylight is the dome's: on a clear day the physical sky (over the
+    /// sky's display scale, which the clouds apply), under rain the weather's at its day level,
+    /// and the sun the surfaces' sun light has.
+    #[test]
+    fn physical_cloud_light_is_the_domes() {
+        let mut s = authored_session_sky();
+        s.climate.sunrise = (5.0, 7.0);
+        s.climate.sunset = (18.0, 20.0);
+        s.hour = 13.0;
+        let mut cols = vec![vec![[0, 0, 0]; 4]; 10];
+        cols[ColorType::SkyUpper as usize] = vec![[40, 46, 255]; 4];
+        cols[ColorType::Horizon as usize] = vec![[200, 180, 160]; 4];
+        cols[ColorType::Sunlight as usize] = vec![[255, 240, 220]; 4];
+        s.weather = Weather { classification: 1, fog: [5_000.0, 120_000.0, 0.0, 0.0, 1.0, 1.0], colors: cols, ..default() };
+        let near = |a: [f32; 3], b: Vec3| (Vec3::from_array(a) - b).abs().max_element() < 1e-4 * (1.0 + b.max_element());
+        let clear = s.physical_cloud_light();
+        let sun = s.sun_dir().normalize();
+        let w = smoothstep(0.10, 0.85, s.physical_sky_clearness());
+        let level = 0.45 + 0.9 * smoothstep(-0.04, 0.25, sun.y);
+        let want = (Vec3::from_array(s.color(ColorType::SkyUpper)) * level).lerp(eval_physical_sky(Vec3::Y, sun, s.physical_sky_clearness()) / s.sky_scale(), w);
+        assert!(w > 0.9 && near(clear.upper, want), "{:?} {want}", clear.upper);
+        let gained = (Vec3::from_array(s.physical_sun_color()) * PHYSICAL_SUN_GAIN).to_array();
+        assert_eq!(clear.sun, gained, "the ground's sun gain, so clouds and land are lit alike");
+        assert!(near(clear.ground, (Vec3::from_array(clear.upper) + Vec3::from_array(clear.horizon)) * 0.5));
+
+        s.weather.classification = 4;
+        s.weather.rainy = true;
+        let rain = s.physical_cloud_light();
+        let w = smoothstep(0.10, 0.85, s.physical_sky_clearness());
+        let weather = Vec3::from_array(s.color(ColorType::SkyUpper)) * level;
+        let want = weather.lerp(eval_physical_sky(Vec3::Y, sun, s.physical_sky_clearness()) / s.sky_scale(), w);
+        assert!(w < 0.5 && near(rain.upper, want), "rain keeps most of the weather's own sky: {w} {:?} {want}", rain.upper);
     }
 
     #[test]

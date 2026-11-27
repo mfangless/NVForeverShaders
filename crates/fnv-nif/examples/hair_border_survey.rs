@@ -1,5 +1,5 @@
 //! Diagnostic survey of hair-shader shapes' open borders and draw modes, for softening the
-//! hairline (docs/design/graphics-enhanced.md §3.25 "Hair edges"; docs/spec-notes/nif.md §6
+//! hairline (docs/design/graphics-enhanced.md §3.26 "Hair edges"; docs/spec-notes/nif.md §6
 //! "Hair borders and alpha"). Per shape with the Hair shader flag (BSShaderFlags bit 18
 //! [documented: nif.xml BSShaderFlags]) in a mesh whose path holds "hair": its vertices
 //! welded by position (a UV seam is no border), the edges used by one triangle only (the
